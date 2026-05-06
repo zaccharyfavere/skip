@@ -461,6 +461,52 @@ export interface ExternalService {
 export type NamedCollections = { [name: string]: EagerCollection<Json, Json> };
 
 /**
+ * Declaration of a single dependency on another resource.
+ *
+ * Used in DependentResource.dependencies to specify that a resource
+ * depends on another resource of the same service.
+ *
+ * @typeParam ParentParams - Type of the dependent resource's own parameters.
+ */
+export interface ResourceDependency<ParentParams extends Json = Json> {
+  /**
+   * Name of the depended-upon resource.
+   *
+   * Must match a key in `SkipService.resources`.
+   */
+  resource: string;
+
+  /**
+   * Function to derive the parameters of the depended-upon resource
+   * from the parameters of the dependent resource.
+   *
+   * @param parentParams - The parameters passed to the dependent resource.
+   * @returns The parameters to instantiate the depended-upon resource with.
+   */
+  params: (parentParams: ParentParams) => Json;
+}
+
+/**
+ * Map of named dependencies on other resources.
+ *
+ * Each entry associates a local name (used to retrieve the resolved collection
+ * inside `instantiate`) to a ResourceDependency declaration.
+ */
+export type ResourceDependencies = {
+  [name: string]: ResourceDependency;
+};
+
+/**
+ * Map of resolved dependencies passed to DependentResource.instantiate.
+ *
+ * For each key declared in `static dependencies`, the corresponding value
+ * is the eager collection of the resolved sub-resource.
+ */
+export type ResolvedDependencies = {
+  [name: string]: EagerCollection<Json, Json>;
+};
+
+/**
  * Resource provided by a `SkipService`.
  *
  * `Resource`s make up the public interface of a `SkipService`, specifying how to respond to reactive requests, either by accessing data from the shared computation graph generated in the service's `createGraph` function or extending it with further reactive computations as needed to handle the request.
@@ -479,6 +525,37 @@ export interface Resource<
    */
   instantiate(
     collections: Collections,
+    context: Context,
+  ): EagerCollection<Json, Json>;
+}
+
+/**
+ * A resource that declares dependencies on other resources of the same service.
+ *
+ * Unlike a plain `Resource`, a `DependentResource` lists in a static
+ * `dependencies` field other resources whose output it needs. The Skip runtime
+ * resolves these dependencies and passes the resulting collections to
+ * `instantiate` as its second argument.
+ *
+ * Cycles in `dependencies` declarations are detected at service startup.
+ *
+ * @typeParam Collections - Collections provided to the resource computation by the service's `createGraph`.
+ */
+export interface DependentResource<
+  Collections extends NamedCollections = NamedCollections,
+> {
+  /**
+   * Build the reactive compute graph of the reactive resource.
+   *
+   * @param collections - Collections provided by the service's `createGraph`.
+   * @param dependencies - Resolved collections of the resources declared in
+   *   the static `dependencies` field, keyed by their declared local names.
+   * @param context - Skip Runtime internal state.
+   * @returns An eager collection containing the outputs of this resource.
+   */
+  instantiate(
+    collections: Collections,
+    dependencies: ResolvedDependencies,
     context: Context,
   ): EagerCollection<Json, Json>;
 }
@@ -557,7 +634,11 @@ export interface SkipService<
 
   /** Reactive resources which constitute the public interface of this reactive service. */
   resources: {
-    [name: string]: new (params: Json) => Resource<ResourceInputs>;
+    [name: string]:
+      | (new (params: Json) => Resource<ResourceInputs>)
+      | ((new (params: Json) => DependentResource<ResourceInputs>) & {
+          dependencies: ResourceDependencies;
+        });
   };
 
   /**

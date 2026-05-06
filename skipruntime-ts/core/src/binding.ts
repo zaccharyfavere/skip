@@ -8,6 +8,7 @@ import {
   type Mapper,
   type Reducer,
   type Resource,
+  type DependentResource,
 } from "./api.js";
 import type { HandlerInfo, ServiceDefinition } from "./index.js";
 
@@ -70,7 +71,9 @@ export interface FromBinding {
 
   // Resource
 
-  SkipRuntime_createResource(ref: Handle<Resource>): Pointer<Internal.Resource>;
+  SkipRuntime_createResource(
+    ref: Handle<{ instance: Resource | DependentResource; params: Json }>,
+  ): Pointer<Internal.Resource>;
 
   // Service
 
@@ -210,6 +213,11 @@ export interface FromBinding {
     from: Pointer<Internal.CJObject>,
     pattern: string,
   ): Pointer<Internal.CJArray>;
+
+  SkipRuntime_Context__getResourceCollection(
+    name: string,
+    params: Pointer<Internal.CJObject>,
+  ): string;
 
   SkipRuntime_Context__useExternalResource(
     service: string,

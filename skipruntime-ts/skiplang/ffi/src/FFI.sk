@@ -240,6 +240,19 @@ native fun unsubscribeOfService(
   instance: String,
 ): void;
 
+@cpp_extern("SkipRuntime_ServiceDefinition__fetch")
+@debug
+native fun fetchOfService(
+  service: UInt32,
+  supplier: String,
+  dirName: String,
+  key: SKJSON.CJSON,
+): Float;
+
+@cpp_extern("SkipRuntime_deleteLazyService")
+@debug
+native fun deleteLazyService(service: UInt32): void;
+
 @cpp_extern("SkipRuntime_ServiceDefinition__shutdown")
 @debug
 native fun shutdownOfService(service: UInt32): Float;
@@ -299,6 +312,10 @@ class ExternService(eptr: SKStore.ExternalPointer) extends Service {
 
   fun unsubscribe(supplier: String, instance: String): void {
     unsubscribeOfService(this.eptr.value, supplier, instance)
+  }
+
+  fun fetch(supplier: String, dirName: String, key: SKJSON.CJSON): Waitable {
+    Waitable(fetchOfService(this.eptr.value, supplier, dirName, key))
   }
 
   fun shutdown(): Waitable {
@@ -460,6 +477,24 @@ fun getArrayOfLazyCollection(lazy: String, key: SKJSON.CJSON): SKJSON.CJArray {
   SKJSON.CJArray(lazyForName(lazy).getArray(key))
 }
 
+@export("SkipRuntime_setLazyCollectionValue")
+fun exportSetLazyCollectionValue(
+  dirName: String,
+  key: SKJSON.CJSON,
+  values: SKJSON.CJArray,
+): void {
+  _ = runWithResult(context ~> {
+    SkipRuntime.setLazyCollectionValue(
+      context,
+      SKStore.DirName::create(dirName),
+      key,
+      values match {
+      | SKJSON.CJArray(vs) -> vs
+      },
+    )
+  });
+}
+
 /************  Notifier ****************/
 
 @cpp_extern("SkipRuntime_Notifier__subscribed")
@@ -613,6 +648,8 @@ fun createResourceOfRuntime(
 @export("SkipRuntime_Runtime__getAll")
 fun getAllOfRuntime(resource: String, params: SKJSON.CJSON): SKJSON.CJSON {
   runWithResult(context ~> {
+    /* Propagate any pending lazy value updates before reading */
+    context.update();
     res = getAll(context, resource, params);
     /* Ensure all resources closed at right time */
     updateContext(context);
@@ -633,6 +670,8 @@ fun getForKeyOfRuntime(
   key: SKJSON.CJSON,
 ): SKJSON.CJSON {
   runWithResult(context ~> {
+    /* Propagate any pending lazy value updates before reading */
+    context.update();
     res = getForKey(context, resource, params, key);
     /* Ensure all resources closed at right time */
     updateContext(context);
@@ -794,6 +833,18 @@ fun useExternalResource(
   params: SKJSON.CJSON,
 ): String {
   useExternalCollection(service, identifier, params).getId()
+}
+
+@export("SkipRuntime_Context__getResourceCollection")
+fun getResourceCollectionOfContext(
+  name: String,
+  params: SKJSON.CJSON,
+): String {
+  context = getContext() match {
+  | Some(c) -> c
+  | None() -> invariant_violation("Store context must be specified.")
+  };
+  getResourceCollection(context, name, params)
 }
 
 /************ initService ****************/

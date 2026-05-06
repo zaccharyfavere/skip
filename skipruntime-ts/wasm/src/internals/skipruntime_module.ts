@@ -16,6 +16,7 @@ import type {
   LazyCompute,
   ExternalService,
   Resource,
+  DependentResource,
   Watermark,
   HandlerInfo,
   ServiceDefinition,
@@ -80,7 +81,9 @@ export interface FromWasm {
 
   // Resource
 
-  SkipRuntime_createResource(ref: Handle<Resource>): ptr<Internal.Resource>;
+  SkipRuntime_createResource(
+    ref: Handle<{ instance: Resource | DependentResource; params: Json }>,
+  ): ptr<Internal.Resource>;
 
   // Service
 
@@ -225,7 +228,12 @@ export interface FromWasm {
   SkipRuntime_Context__useExternalResource(
     service: ptr<Internal.String>,
     identifier: ptr<Internal.String>,
-    params: ptr<Internal.CJSON>,
+    params: ptr<Internal.CJObject>,
+  ): ptr<Internal.String>;
+
+  SkipRuntime_Context__getResourceCollection(
+    name: ptr<Internal.String>,
+    params: ptr<Internal.CJObject>,
   ): ptr<Internal.String>;
 }
 
@@ -281,11 +289,13 @@ interface ToWasm {
   // Resource
 
   SkipRuntime_Resource__instantiate(
-    resource: Handle<Resource>,
+    resource: Handle<{ instance: Resource | DependentResource; params: Json }>,
     collections: ptr<Internal.CJObject>,
   ): ptr<Internal.String>;
 
-  SkipRuntime_deleteResource(resource: Handle<Resource>): void;
+  SkipRuntime_deleteResource(
+    resource: Handle<{ instance: Resource | DependentResource; params: Json }>,
+  ): void;
 
   // ServiceDefinition
 
@@ -456,7 +466,7 @@ export class WasmFromBinding implements FromBinding {
   }
 
   SkipRuntime_createResource(
-    ref: Handle<Resource>,
+    ref: Handle<{ instance: Resource | DependentResource; params: Json }>,
   ): Pointer<Internal.Resource> {
     return this.fromWasm.SkipRuntime_createResource(ref);
   }
@@ -749,7 +759,21 @@ export class WasmFromBinding implements FromBinding {
       ),
     );
   }
+
+  SkipRuntime_Context__getResourceCollection(
+    name: string,
+    params: Pointer<Internal.CJObject>,
+  ): string {
+    return this.utils.importString(
+      this.fromWasm.SkipRuntime_Context__getResourceCollection(
+        this.utils.exportString(name),
+        toPtr(params),
+      ),
+    );
+  }
 }
+
+
 
 class LinksImpl implements Links {
   private tobinding!: ToBinding;
@@ -867,7 +891,7 @@ class LinksImpl implements Links {
   // Resource
 
   instantiateOfResource(
-    skresource: Handle<Resource>,
+    skresource: Handle<{ instance: Resource | DependentResource; params: Json }>,
     skcollections: ptr<Internal.CJObject>,
   ): ptr<Internal.String> {
     return this.utils.exportString(
@@ -878,10 +902,11 @@ class LinksImpl implements Links {
     );
   }
 
-  deleteResource(resource: Handle<Resource>) {
+  deleteResource(
+    resource: Handle<{ instance: Resource | DependentResource; params: Json }>,
+  ) {
     this.tobinding.SkipRuntime_deleteResource(resource);
   }
-
   // ServiceDefinition
 
   createGraphOfServiceDefinition(

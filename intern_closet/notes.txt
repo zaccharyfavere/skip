@@ -1,0 +1,1155 @@
+ATTENTION FORMAT
+make fmt-js pour formater tout
+make fmt-sk 
+
+
+docker run -it --rm -v $(pwd):/workspace -w /workspace skip-engine bash
+
+
+BUILD
+make clean
+make -f Makefile
+npx tsx aaaa.ts
+npm run build
+make test-skipruntime-ts
+make build pour build natif
+make test-sk-testMap1
+
+DANS RUNTIME-TS
+make build-examples
+make regen-example.ts pour reformer les .exp
+
+
+
+
+
+
+
+Modifs 10/04
+
+- api.ts, modif les trucs vu hier : LazyExternalService supprimé,
+- ExternalService gere maintenant eager et lazy
+- ExternalService est tjr une interface avec fetch? et initLazy? en attendant que daniel valide le changement en type pour que :
+- ---- ExternalService soit maintenant un type, pour pouvoir en faire un type union et obliger user a utiliser fetch et lazyInit si il utilise du lazy
+
+- useExternalResource modif et enlevé la surcharge pour en faire une autre ft useLazyExternalResource
+- ajouté Context_useLazyExternalResource dans le binding.ts pour que l'index.ts l'appelle
+- implementé useLazyExternalResource dans le ContextImpl de l'index qui appelle SkipRuntime_Context__useLazyExternalResource de FFI.sk
+- ajouté SkipRuntime_Context__useLazyExternalResource et son export dans FFI.sk, qui appelle useLazyExternalCollection du SkipRuntime
+- ajouté fetch et initLazy dans FFI.sk, et leur fetchOfservice et initLazyOfservice
+A faire/finir
+- --- ajouter le LazyCompute special qui appelle fetch sur le service externe quand une cle est demandée dans Runtime.sk
+- --- ajouter useLazyExternalCollection dans le Runtime.sk qui crée la TLazyDir avec le LazyCompute particulier et qui appelle initLazy sur le service externe en lui passant invalidate
+- --- tojs.cc mode natif a modifier, ajouter la declaration C++ de SkipRuntime_Context__useLazyExternalResource
+- tojs.cc ajouter la ft C++ qui fait le pont : traduit les types JS vers C et appelle la fonction Skiplang, et enregistrer cette fonction dans le binding via AddFunction
+- --- skipruntime_module.ts mode WASM a modif, ajouter la declaration de SkipRuntime_Context__useLazyExternalResource dans l'interface FromWasm, et implementer la methode dans la classe qui traduit les strings et appelle fromWasm
+
+
+Trouver la fonction existante pour mettre à jour une valeur lazy
+
+-------------------------------------------------------------------------------------------
+
+Modifs 13/04
+
+api.ts         ← LazyExternalService avec fetch, AsyncResult
+binding.ts     ← déjà fait
+index.ts       ← ServiceDefinition.fetch + useLazyExternalResource ContextImpl
+FFI.sk         ← modifier fetchOfService signature + ExternLazyService
+Runtime.sk     ← ExternalServiceLazyCompute + useLazyExternalCollection
+tojs.cc        ← pont js -> skiplang
+fromjs.cc      ← pont skiplang -> js
+skipruntime_module.ts ← pont WASM fetch
+
+-------------------------------------------------------------------------------------------
+
+Modifs 10-14/04 resumé complet des modifs
+
+Côté API publique TypeScript (api.ts) :
+
+Ajout de LazyExternalService avec fetch(key, callbacks) et shutdown
+Ajout des types ALoading, AValue, AError, AsyncResult
+Ajout de useLazyExternalResource dans Context
+Ajout de lazyExternalServices dans SkipService
+
+Côté runtime TypeScript (index.ts, binding.ts) :
+
+Ajout de lazyExternals et de la méthode fetch dans ServiceDefinition
+Mise à jour de shutdown et derive pour gérer les lazy services
+Ajout de SkipRuntime_ServiceDefinition__fetch dans ToBinding
+Ajout de useLazyExternalResource dans ContextImpl
+Ajout de SkipRuntime_Context__useLazyExternalResource dans FromBinding
+
+Côté Skiplang (BaseTypes.sk, FFI.sk, Runtime.sk) :
+
+Ajout de fetch sur base class Service
+Ajout de fetchOfService et fetch sur ExternService dans FFI.sk
+Ajout de ExternalServiceLazyCompute — retourne loading immédiatement et déclenche fetch
+Ajout de invalidateLazyKey — invalide une clé du cache lazy
+Ajout de useLazyExternalCollection — crée la TLazyDir avec ExternalServiceLazyCompute
+
+Côté ponts natif/WASM (tojs.cc, skipruntime_module.ts) :
+
+Ajout des fonctions C++ et WASM pour useLazyExternalResource et fetch
+
+-------------------------------------------------------------------------------------------
+
+- Le client demande "Paris" → il récupère {"type":"loading"} immédiatement
+- En parallèle, MeteoService.fetch() tourne en tâche de fond
+- Quand le fetch aboutit, callbacks.update([...]) est appelé
+- Stocke la valeur dans storedResults puis appelle invalidateLazyKey
+- Skip propage automatiquement : TLazyDir sait que CityMapper a lu cette clé, donc il re-déclenche mapEntry pour Paris
+- mapEntry refait meteo.getArray("Paris") → computeFor → getStoredResult → trouve la valeur → renvoie {"type":"value",...}
+- La EagerCollection cities est mise à jour avec la nouvelle valeur pour Paris
+- Le prochain snapshot du client récupère la value sans aucun re-fetch côté API
+
+WORKFLOW EXAMPLE AVEC UNE API METEO
+
+Quelqu'un demande Paris - sens ascendant
+
+
+
+Utilisateur demande "Paris"
+      ↓
+LazyCollection.getArray("Paris")          ← index.ts (LazyCollectionImpl)
+      ↓ cache vide
+computeFor("Paris") déclenché             ← Runtime.sk (ExternalServiceLazyCompute)
+      ↓
+service.fetch("mock", "Paris") appelé     ← Runtime.sk → FFI.sk → index.ts (ServiceDefinition)
+      ↓
+addSubscription(context, waitable)        ← Runtime.sk
+      ↓
+retourne { type: "loading" }              ← Runtime.sk
+      ↓
+Utilisateur reçoit { type: "loading" }    ← index.ts (LazyCollectionImpl)
+
+-------------------------------------------------------------------------------------------
+
+Fetch renvoie 18°C
+
+
+
+LazyExternalService.fetch complète        ← adaptateur (MockLazyService)
+      ↓
+callbacks.update(["18°C"]) appelé         ← index.ts (ServiceDefinition)
+      ↓
+ServiceDefinition stocke "Paris" → "18°C" ← index.ts (Map interne)
+      ↓
+invalidateLazyKey("Paris") appelé         ← index.ts → binding.ts → FFI.sk → Runtime.sk
+      ↓
+Cache de TLazyDir vidé pour "Paris"       ← Runtime.sk (invalidateLazyKey)
+
+-------------------------------------------------------------------------------------------
+
+Quelqu'un re-demande Paris
+
+
+
+Utilisateur redemande "Paris"
+      ↓
+LazyCollection.getArray("Paris")          ← index.ts (LazyCollectionImpl)
+      ↓ cache vide (invalidé)
+computeFor("Paris") déclenché             ← Runtime.sk (ExternalServiceLazyCompute)
+      ↓
+service.getStoredResult("mock", "Paris")  ← Runtime.sk → FFI.sk → index.ts (ServiceDefinition)
+      ↓ valeur trouvée dans le Map
+retourne { type: "value", payload: "18°C" } ← Runtime.sk
+      ↓
+Utilisateur reçoit { type: "value", payload: "18°C" } ← index.ts
+
+-------------------------------------------------------------------------------------------
+
+
+
+
+Runtime.sk  ← 1. la vraie logique
+FFI.sk      ← 2. l'export vers l'extérieur  
+tojs.cc     ← 3. pont natif C++
+skipruntime_module.ts ← 4. pont WASM
+
+-------------------------------------------------------------------------------------------
+
+ATTENTION FORMAT
+make fmt-js pour formater tout
+make fmt-sk 
+
+
+docker run -it --rm -v $(pwd):/workspace -w /workspace skip-engine bash
+
+
+BUILD
+make clean
+make -f Makefile
+npx tsx aaaa.ts
+npm run build
+make test-skipruntime-ts
+make build pour build natif
+make test-sk-testMap1
+
+DANS RUNTIME-TS
+make build-examples
+make regen-example.ts pour reformer les .exp
+
+3 etats
+1 loading
+1 error
+1 valeur
+
+ON EST EN SYNCHRONE
+
+
+
+-------------------------------------------------------------------------------------------
+
+TO DO
+
+- Mon sh ne marche pas avec le make de tests
+- Aller explorer les tests dans skipruntime-ts/tests pour faire une batterie de tests unitaires sur le lazy
+- Repasser dans ce que j'ai fait pour y ajouter des commentaires détaillés
+
+Il doit manquer des trucs dans le makefile de Daniel parceque en changeant de container je pouvais plus build avec le sien
+
+
+1. getStoredResult disparaît. Le TLazyDir gère déjà le cache via LDefined. Si la clé est en LDefined, Skip retourne directement la valeur sans rappeler computeFor. Notre storedResults Map JS est un double cache inutile qui en plus crée une dépendance circulaire.
+
+2. Plus d'invalidation, on SET. Quand les données arrivent, au lieu de invalidateKey (LDefined → LRemoved) puis attendre un re-pull qui rappelle computeFor, on écrit directement la nouvelle valeur dans le TLazyDir : LDefined(nouvelles données, reads). C'est un "push" direct, pas un "invalidate + lazy re-compute".
+
+3. Transactions. L'écriture dans le TLazyDir doit passer par le pattern fork/merge comme CollectionWriter.update, pour ne pas avoir les races de transactions qu'on a eues.
+
+4. fetch ne doit PAS attendre le service. La Promise retournée par fetch sert à une éventuelle initialisation, pas à attendre la réponse API. fetch doit : lancer l'appel async (fire-and-forget), retourner immédiatement. Quand la réponse arrive → appeler update avec la valeur (ou l'erreur).
+
+5. Erreurs via update. Pas de callback error séparé (on l'a déjà viré). Mais en plus, même le .catch côté framework disparaît. L'erreur est gérée dans le fetch de l'example : callMeteoApi().then(value => update(value)).catch(err => update(errorValue)). Le type d'update accepte les erreurs.
+
+6. L'example se restructure. MeteoService.fetch fait : appeler une méthode privée callMeteoApi(key) (async, fait le vrai appel réseau), .then(result => callbacks.update(result)), .catch(err => callbacks.update(errorResult)). Le fetch lui-même resolve immédiatement.
+
+call api then catch
+
+
+- ||| fetch (api.ts + example) — changer la sémantique de la Promise, restructurer l'example avec callMeteoApi privé
+
+- ||| update côté framework (index.ts) — écrire directement dans le TLazyDir via le pattern fork/merge au lieu d'invalidateKey, virer storedResults
+
+- ||| computeFor (Runtime.sk) — simplifier, virer getStoredResult
+
+- ||| Nettoyage FFI — virer les exports devenus inutiles (getStoredResult, invalidateLazyKey), ajouter le set direct
+
+- ||| Nettoyage ponts (WASM module + tojs.cc/fromjs.cc) — aligner avec les nouveaux exports
+
+- ||| Mettre a jour fromBinding dans le binding.ts
+
+
+--------------------------------------------------------------------------------
+
+- pas besoin de getStoredResult, parceque si le result est deja dedans il va pas rappeler computefor, getstoredresult redondant
+car getStoredResult cree une dependance sur lui meme actuellement
+le fonctionnement interne du skip runtime gere deja le bordel
+
+- Il ne faut pas "invalider" une cle, il faut la re-set avec une nouvelle valeur.
+Au lieu de Lremoved, coller Ldefined avec une nouvelle valeur
+
+- pas de concurrence de transactions car synchrone
+dans update, je gere pas les transactions,
+il faut que je gere les transactions, equivalent du update de collectionwriter dans index
+
+- on attends pas le resultat avec fetch, le promise du fetch est si tu as besoin d'init, dans mon exemple je cree une promesse qui fait attendre le resultat, je resolve que si j'ai un update.
+j'attends encore l'update d'avant quand je resolve -> probleme
+je doit pas attendre le resultat sur le fetch. on doit pas attendre le resultat de l'api que j'attend
+quand j'appelle fetch il me faut : fetch then catch error
+le retour du FETCH ATTEND PAS LE SERVICE ---> a ecrire dans les commentaires de l'api.ts sur fetch
+c'est le vrai probleme du programme : promesse de fetch qui attend, ca marchait parceque je gerais pas les transac
+
+
+- pour les tests, si je veux une erreur genre berlin, je update en error
+
+
+- dans une methode separée dans mon example
+promise du fetch c'est pas l'attente du service que j'appelle, c'est pour attendre une eventuelle initialisation de quelque chose
+private call api ou callmeteo api, un call async exterieure. la methode fait exactement pareille que fetch sans le callback update
+dans le fetch je fait call api then update catch valeur et then update catch erreur
+au lieu de callback update, tu resolve ta valeur
+
+- update value est forcement un type erreur, donc on peut faire de update un type erreur
+
+
+--------------------------------------------------------------------------------
+
+
+transactions gerees dans setLazyValue
+
+
+data arrivent de l'API externe :
+Le callback update dans fetch est appelé avec le résultat (value ou error)
+Il appelle this.setLazyValue(dirName, key, [result])
+setLazyValue ouvre une transaction fork/merge côté TS
+À l'intérieur, il appelle SkipRuntime_setLazyCollectionValue via le binding
+Qui appelle exportSetLazyCollectionValue dans FFI.sk
+Qui appelle setLazyCollectionValue dans Runtime.sk
+Qui appelle dir.setValue(key, values, context) sur le TLazyDir
+Qui écrit LDefined(nouvelles valeurs) directement dans le TLazyDir
+Puis context.update() propage les changements
+
+
+--------------------------------------------------------------------------------
+
+UNIT TESTS
+
+testLazyExternalService_loading : on lit une clé immédiatement après le démarrage du service. Le fetch est async avec 50ms de delai, donc computeFor n'a pas encore reçu les données. On vérifie que le résultat est {type: "loading"}.
+
+testLazyExternalService_value : lit une clé (ce qui déclenche le fetch), puis attend 200ms pour que le setTimeout(50) se résolve et que setLazyCollectionValue écrive la valeur dans le TLazyDir. Relit ensuite la même clé et vérifie qu'on obtient {type: "value", payload: [{city: "Paris", temp: 20}]}.
+
+testLazyExternalService_error : même chose mais avec la clé "error_city" qui fait que le mock appelle callbacks.update({type: "error", ...}). Vérifie que l'erreur remonte correctement après le timeout.
+
+testLazyExternalService_multipleKeys : Déclenche 3 fetchs (Paris, London, error_city) puis attend. Vérifie que les 3 clés ont chacune leur valeur correcte.
+
+testLazyExternalService_cacheHit : Déclenche un fetch pour Paris, attend, puis relit Paris deux fois supplémentaires. On vérifie que fetchCount n'a pas augmenté — preuve que le TLazyDir sert son cache (LDefined) sans rappeler computeFor ni re-fetcher.
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+----------------------------------------------------------------- Migration node-addon-api ---------------------------------------------------------------------
+
+regarder Nouvelle API node, adapter skip a la nouvelle api node
+la partie cpp au lieu d'utiliser le v8, attaquer la nouvelle api genre napi, chercher node cpp api
+en faisant le moins de taff possible
+
+pas de multi threading - important - car probleme potentiel de mono-threading - je vais me bruler les ailes
+
+ne pas chercher a optimiser
+
+--------------------------------------------------------------------------------
+
+-------> on part sur NAPI_VERSION=9 + node-addon-api ^8.7.0. 
+
+node-addon-api ^8.7.0 -- derniere version de node-addon-api a ce jour
+
+
+quelle version de C++ on utilises ? une norme genre c++17 ?
+
+node-addon-api en 8.7 parce que c'est la dernière stable et que c'est une dépendance de build. NAPI_VERSION=9 parce que c'est la plus récente qui reste installable sur toutes les Node.js en LTS actif — la 10 exigerait Node 22.14 minimum, ce qui couperait Node 20
+
+
+------------------------------------------------------------------------------------------------------
+MIGRATION PLAN 
+
+- binding.gyp     | DONE
+- package.json    | DONE
+- common.cc/h     | DONE
+- cjson.cc/h      | DONE
+- fromjs.cc/h     | DONE
+- tojs.cc/h       | DONE
+- main.cc         | DONE
+
+------------------------------------------------------------------------------------------------------
+MIGRATION PATTERN
+-> voir img dans intern closet
+
+Napi::Env porte le contexte. En V8, on devait souvent écrire isolate->GetCurrentContext() pour obtenir le contexte courant. En node-addon-api, Napi::Env contient déjà cette information, donc tout est simplifié.
+
+RAII au lieu de Local<T> + HandleScope. Les types Napi gèrent leur propre durée de vie. On ne déclares plus de HandleScope scope(isolate) en début de fonction, le wrapper s'en occupe automatiquement via Napi::CallbackInfo.
+
+Les valeurs portent leur env. Napi::Value, Napi::Object, etc. contiennent une référence implicite à leur Napi::Env. Donc dès qu'on passe une Napi::Value à une fonction, pas besoin de lui passer aussi l'env — elle est accessible via .Env().
+
+Moins d'indirections. Plus de Template intermédiaire, plus de Context explicite — l'API expose directement le niveau où on travailles.
+
+Les erreurs passent par exceptions, pas par types encapsulés. MaybeLocal<T> + .ToLocalChecked() + Maybe<bool> + .FromJust() → tout disparaît au profit du modèle exception standard C++. Ton code ressemble à du code C++ normal au lieu de ressembler à du Java verbalisé.
+
+Les conversions courantes sont implicites. const char* → Napi::String, int → Napi::Number, etc. On as plus à envelopper chaque valeur primitive avant de la passer.
+
+isolate->GetCurrentContext()->Global() → env.Global(). Accès au global en une étape.
+
+obj->Get(context, FromUtf8(isolate, "key")).ToLocalChecked() → obj.Get("key"). Les accès de propriétés par clé string sont plus directs.
+
+Les casts .As<T>() restent nécessaires quand on veux passer d'une Napi::Value générique à un type précis (Napi::Object, Napi::Function, etc.). Pas de magie.
+
+function.Call(recv, std::vector<napi_value>) remplace le couple argc/argv. Les initializer lists {val1, val2} marchent directement.
+
+Les erreurs se propagent par exceptions C++ au lieu de crasher le process via .ToLocalChecked(). C'est plus sûr par défaut.
+
+v8::TryCatch + HasCaught() → try { ... } catch (const Napi::Error& e) { ... }. Le modèle V8 "exception en attente" disparaît au profit du modèle C++ standard.
+
+tryCatch.Exception() → e.Value(). Récupère la valeur JS sous-jacente à l'exception.
+
+IsNativeError() n'a pas d'équivalent direct. On teste .Get("stack").IsString() comme substitut pragmatique.
+
+GetConstructorName() → .Get("name"). On passe par la propriété JS standard.
+
+Exception::Error(msg) → Napi::Error::New(env, msg). Construction d'un objet Error JS depuis C++.
+
+exc->Set(context, key, value).FromJust() → obj.Set(key, value). Même simplification que pour les autres accès de propriétés, plus de context explicite, plus de déballage.
+
+isolate->ThrowException(error) → error.ThrowAsJavaScriptException(). L'idiome node-addon-api pour lever une exception JS depuis C++.
+
+Le mode NAPI_CPP_EXCEPTIONS simplifie NatTryCatch mais ne le rend pas inutile. Les exceptions C++ non-Napi (SkipException, std::exception) doivent encore être attrapées et converties manuellement.
+
+napiError.Value() retourne directement une Napi::Object parce qu'une Error JS est un objet. Pas besoin de cast .As<Napi::Object>().
+
+pour fromjs, Persistant object :
+// V8
+static Persistent<Object> kExternFunctions;
+kExternFunctions.Reset(isolate, externFunctions);  // pour assigner
+Local<Object> obj = kExternFunctions.Get(isolate);  // pour récupérer
+
+// Napi
+static Napi::ObjectReference kExternFunctions;
+kExternFunctions = Napi::Persistent(externFunctions);  // pour assigner
+Napi::Object obj = kExternFunctions.Value();  // pour récupérer
+
+aucun equivalent dans la nouvelle api a Isolate* isolate = Isolate::GetCurrent() , donc on va recuperer l'env depuis la reference elle meme, car
+Napi::ObjectReference porte son propre env.
+
+------------------------------------------------------------------------------------------------------
+
+1 - Napi::Env remplace à la fois Isolate* et le Context. Quand on voyais isolate->GetCurrentContext()->machin(), maintenant juste env.machin().
+et aussi les objets (style Napi::Value, Napi::Object, etc.) contiennent maintenant une référence implicite à leur Napi::Env.
+-----------------
+
+2 - Les erreurs passent par exceptions C++ standard. Plus de valeurs "peut-être absentes" à déballer, plus de TryCatch en attente — du vrai try/catch C++.
+
+Anciennement en v8 pour les erreurs structurelles (propriete manquante, cast impossible), ca retournait MaybeLocal qui pouvait etre soit vide soit rempli, en fonction de si ca avait fonctionné en js ; il y avait des ToLocalChecked() partout mais sans verifier avant que c'etait rempli, bcp de crash potentiels.
+
+Et pour les exceptions javascript explicites, vous utilisiez des try catch apres un call pour savoir si il avait echoué (enfin si il y a eu une exception) avec genre .hasCaught, donc ca oblige a faire des try catch systematiquement apres chaque call...
+
+Maintenant, tout se simplifie beaucoup : toute exception coté JS devient une exception coté C++ grace au type Napi::Error, donc un seul try catch, try le call, catch Napi::Error.
+et pour le cas MaybeLocal, il disparait, et a la place il renvoie soit Napi::Value soit il throw une Napi::Error.
+-----------------
+
+3 - Beaucoup de méthodes Napi acceptent directement les types C++ bruts (const char*, std::string, int, double). Là où V8 forçait à passer par un objet Local<String> ou Local<Number> intermédiaire, Napi propose des surcharges qui font la conversion en interne. Le code devient plus court et plus lisible.
+-----------------
+
+4 - Pour convertir une Napi::Value générique en type précis, deux outils : .As<Napi::Machin>() quand on est sûr du type (ou après un test IsMachin()), et .ToString() / .ToNumber() quand on veux forcer la conversion avec coercion.
+-----------------
+
+5 - Disparition des helpers de conversion manuels (FromUtf8...). Les constructeurs Napi (Napi::String::New, etc.) font le job directement.
+-----------------
+
+6 - Disparition des HandleScope manuels. En V8, chaque fonction qui manipulait des objets JS devait ouvrir un HandleScope en début de fonction pour structurer la durée de vie des références côté garbage collector. En Napi, ces scopes sont gérés automatiquement par le wrapper. Ca fait une ligne en moins par fonction sur tout le code, et un risque de bug en moins (oublier le handlescope)
+-----------------
+
+7 - Les exceptions C++ Napi reposent sur la macro NAPI_CPP_EXCEPTIONS (activée dans binding.gyp). Cette option permet aux erreurs JS d'être propagées comme exceptions C++ standard. Sans cette option, il faudrait revenir à un modèle proche de V8 (vérification manuelle de IsExceptionPending après chaque appel).
+-----------------
+
+8 - Napi exige un retour de Napi::value ; 
+Dans v8, on utilisait args.GetReturnValue().Set pour return, en mettant le result dans un objet filé par le moteur, et donc jamais de return, toujours void
+Maintenant, on peut return directement, et Napi attend un retour dans tout les cas, donc meme sur du void pur sans retour, ca devient un Napi::value, quitte a retourner env.Undefined()
+
+------------------------------------------------------------------------------------------------------
+
+CHOIX DISCUTABLES
+
+Pour toute la migration, j'ai choisi de ne pas utiliser de "using" contrairement a avant, parceque utiliser les Napi::XXXX permet de mieux voir les changements de fonctionnements et de types de la nouvelle API. 
+
+
+common.cc
+- Refactorisation des Trycatch avec HandleJSException
+- V8 a IsNativeError() pour détecter proprement les erreurs JS standard, node-addon-api ne l'a pas. Je choisis de tester stack.IsString() comme approximation pratique. C'est un détail qui n'affecte que les cas tordus (exceptions bizarres non-standard).
+- Suppression de FromUtf8, car avec la nouvelle API, plus besoin, ca complexifie juste la signature en wrappant Napi::String::New(env, str)
+- Dans JSCheckFunction, j'utilise .ThrowAsJavaScriptException() au lieu de throw dans le reste des fonctions, specifiquement car JSCheckFunction retourne un bool, donc la fonction continue apres un throw pour faire return false.
+Avec throw, le return false ne serait jamais atteint, .ThrowAsJavaScriptException() permet de continuer l'exec
+
+cjson.cc
+Dans CreateCJInt, j'ai préservé le comportement V8 d'origine. Le code historique tronquait silencieusement, j'ai conservé cette sémantique pour éviter d'introduire un comportement nouveau pendant la migration :  déclaré bool lossless; mais je ne le lis jamais. On pourrait ajouter un check d'overflow et error si bigint depasse int64_t
+
+main.cc
+Utilisation de skbinding::AddFunction, plutot que exports.set direct, car c'est un helper qu'on utilise partout dans le reste du code et qui permet de remplacer
+exports.Set("runWithGC", Napi::Function::New(...))
+
+tojs.cc
+- BigInt::Int64Value(&lossless) sans vérification de lossless. Identique à CreateCJInt dans cjson.cc. Préservation du comportement V8 d'origine qui tronquait silencieusement.
+- 
+
+quelle version de napi bun supporte
+
+fixé 10 commentaires incoherents/incorrects
+
+
+En gros il y avait un probleme d'incoherence entre la declaration de la fonction coté cpp et sa vraie signature coté skip.
+Côté C++; on déclarait SKIP_SKJSON_createCJInt(int64_t v) — comme si la fonction prenait un entier.
+Mais en allant voir le code Skiplang dans Extern.sk, j'ai vu qu'elle est définie comme prenant un Float, pas un Int.
+
+Vu que les int et les float ne passent pas par les memes registres, int64 passe dans RDI, double passe dans XMM0. Cpp envoyait la valeur dans RDI, skip allait la chercher dans XMM0 qui ducoup contenait n'importe quoi, et qui interpretait ca en 0. 
+
+Pour confirmer, j'ai envoyé 0xDEADBEEF et j'ai vu qu'elle arrivait quand meme comme 0, donc les bits ne sont pas tronqués mais completement perdus en route, et ca explique aussi pourquoi
+les strings passaient sans probleme, parceque un char* est un pointeur, donc passé dans le meme registre entier des deux cotés.
+Pour fix, j'ai passé int64 en double dans la declaration extern C, et dans CreateCJInt on converti en double au lieu de int64.
+
+
+
+
+faire la chaine native BUN
+bun wasm on s'en fout
+bun natif on supporte pas pour le moment
+quand je teste avec bun, lance sur la version d'origine et pas sur la version compilé
+lance sur src pas sur dist
+
+probleme d'acces de fichier
+
+regarde repertoir circleCI, regarder les conf circleCI et faire une route pour les tests bun natif
+
+
+Étape 1 — Installer Bun et tester qu'il charge l'addon natif.
+npm install -g bun
+export BUN_INSTALL="$HOME/.bun"
+export PATH="$BUN_INSTALL/bin:$PATH"
+
+Étape 2 — Faire tourner UN test unitaire sur Bun en mode src. Le plus simple, juste pour valider la chaîne. Genre testMap1.
+fichier test_bun.ts
+const skipNative = require("/workspace/skipruntime-ts/addon/build/Release/skip_runtime.node");
+console.log("Addon chargé !");
+console.log("Fonctions exportées:", Object.keys(skipNative));
+
+LD_LIBRARY_PATH=/workspace/build/skipruntime bun run /tmp/test_bun.ts
+
+Étape 3 — Faire tourner TOUS les tests unitaires sur Bun.
+Étape 4 — Faire tourner UN exemple sur Bun en mode src. Probablement database qui est le plus simple.
+Étape 5 — Faire tourner tous les exemples.
+Étape 6 — Cleaner les Makefile, intégrer Bun proprement.
+
+
+Architecture des packages :
+
+@skipruntime/native est un alias (symlink) vers /workspace/skipruntime-ts/addon
+Quand on fais import { initService } from "@skipruntime/native", Node résout vers /workspace/skipruntime-ts/addon/dist/index.js (a cause de "exports": { ".": "./dist/index.js" } dans le package.json)
+C'est le fichier index.js compilé qui à son tour charge l'addon .node natif
+
+
+Chaine actuelle pour node
+
+make test-skipruntime-ts
+  → npm install (linke les workspaces)
+  → tsc partout (tests, examples, native, etc.)
+  → mocha (lit dist/**/*.spec.js)
+  → scripts shell (lancent node dist/*.js)
+
+
+Chaine voulue pour bun
+bun → src/addon.spec.ts → src/index.ts (du package addon) → skip_runtime.node
+
+pour lancer unit tests avec bun 
+cd /workspace/skipruntime-ts/tests
+LD_LIBRARY_PATH=/workspace/build/skipruntime \
+  bun --bun /workspace/node_modules/.bin/mocha \
+    --no-config \
+    src/addon.bun.spec.ts
+
+pour lancer les examples avec bun
+cd /workspace/skipruntime-ts/tests/examples/bun
+LD_LIBRARY_PATH=/workspace/build/skipruntime ./run_examples.sh
+
+
+
+Je vais faire un .sh qui lance les tests de maniere parametré et plus generalisée que les .sh séparés actuels.
+gardons les .sh actuels en legacy pour l'instant
+
+./run_examples.sh -> sans arguments, lance tout les examples
+./run_examples.sh 
+
+j'ai dû exclure le fichier Bun de la compilation TypeScript pour qu'il n'interfère pas avec le pipeline mocha existant
+
+j'ai pensé pendant un temps que Bun avait un bug de race condition sur remote, mais en fait c'est une sortie valide alternative que le pipeline Node gère avec un fichier .exp.out.alt
+
+
+lancer unit test bun
+cd /workspace/skipruntime-ts/tests
+LD_LIBRARY_PATH=/workspace/build/skipruntime  bun --bun /workspace/node_modules/.bin/mocha --config .mocharc.bun.json
+
+lancer exemples sous bun
+cd /workspace/skipruntime-ts/tests/examples/bun
+  LD_LIBRARY_PATH=/workspace/build/skipruntime ./run_examples.sh
+
+test-bun-unit
+test-bun-examples
+test-skipruntime-ts-bun
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+----------------------------------------------------------------- Ressources partagées ---------------------------------------------------------------------
+
+
+regarder Ressources partagées dans les ressources du skipruntime
+
+faut que quand tu cree une ressource tu declare des ressources qu'elle peut utiliser
+ca impacte quoi/qui
+
+
+Si je comprends bien, aujourd'hui une Resource peut utiliser les collections de createGraph et les services externes, mais pas d'autres Resources du même service.
+
+Il faudrait qu'une resource puisse utiliser/dependre d'autres resources du meme service ?
+
+Voila comment on l'utiliserait dans l'idée
+
+class TopUsers implements Resource<Collections> {
+  static uses = {
+    stats: UserStats,
+  };
+
+  instantiate(cs, context) {
+    const stats = context.useResource(TopUsers.uses.stats);
+    return stats.map(...);
+  }
+}
+
+Cette ressource a le droit d’utiliser UserStats.
+
+TopUsers dépend de UserStats.
+
+Si UserStats est modifiée, TopUsers est potentiellement impactée.
+
+Si TopUsers est instanciée, UserStats doit être instanciable aussi, même sans client direct.
+
+
+En gros si j'ai bien compris la demande, il faut que je rajoute la possibilité de dependances internes entre ressources d'un meme service.
+Aujourd'hui, une ressource expose une collection calculée a partir de createGraph. L'idee serait qu'une ressource puisse declarer d'autres ressources du
+meme service dans genre un "static uses", puis les recuperer via context.useResource, un peu comme useExternalRessource, mais en interne.
+
+
+Impacts ?
+
+- Quand B utilise A et que A change, B doit logiquement etre recalculé
+- Si personne ne consulte A directement mais que B l'utilise, A va devoir etre recalculé aussi
+- Il va falloir faire gaffe aux boucles infinies de dependence genre A qui veut utiliser B qui veut utiliser A...
+
+Aujourd'hui, Context sait utiliser une ressource externe avec useExternalResource, mais pas une ressource du même service. Dans ContextImpl, on voit bien useExternalResource(...) et mon useLazyExternalResource(...), mais pas de useResource(...) interne.
+
+On va toucher a :
+
+- L'API publique, il va falloir modifier le Context pour ajouter useResource du genre
+useResource<K extends Json, V extends Json>(
+  resource: ResourceConstructor,
+  params?: Json
+): EagerCollection<K, V>;
+
+- il va falloir ajuster le type des constructeurs de ressources pour supporter une proprieté statique uses
+
+- Runtime interne, il va falloir une version interne de useExternalResource, mais pour le meme service
+
+- La propagation des changements est gerée par SKStore
+Si UserStats change, il ne suffit peut-être pas de recharger UserStats : il faut aussi recharger toutes les ressources qui dépendent d’elle, par exemple TopUsers.
+
+- Gestion du cycle de vie ?
+Aujourd'hui une ressource est gardée vivante tant qu'un client externe est abonné, sinon elle part au garbage. Une ressource interne n'a pas de client externe, donc il faut un nouveau critère pour décider quand la supprimer.
+Donc UserStats peut être “non consultée directement”, mais doit rester vivante tant que TopUsers en dépend.
+
+
+
+resources: {
+  [name: string]: new (params: Json) => Resource<ResourceInputs>;
+}
+
+
+
+
+pas besoin du nom de la classe, nom de la ressource et d'une fonction pour definir les param de la ressource.
+quand tu rappelle une sous ressource, tu doit lui donner les param dont elle a besoin, tu lui donne une ft qui a tes param a toi
+
+au moment ou tu cree la ressource, createinstance ressourceinstance un truc du genre, tu cree toutes les instances dont tu depend, avec le nom et la fonction qui transforme les param que tu recois vers les param de la ressource
+
+il y a deja compteur de references
+tu doit pouvoir utiliser le meme id pour toute les sous-ressources
+il y a peut etre une astuce a faire mais c'est possible
+normalement quand je cree une ressource, je lui donne une def de la ressource et un id, je devrais pouvoir utiliser meme id.
+
+si ca marche pas avec le meme id, faire un repertoir avec un index.
+
+ajouter un param sur les ressources, un acces sur les sous ressources declarées
+
+sous-champ dependency qui donne acces aux ressources. ou autre.
+
+cote api, le instantiate doit avoir acces aux ressources que tu as declaré
+
+quand tu cree ressource finale, d'abord tu instanciate ressource sur toutes les ressources necessaires, puis tu donne cette liste la a la ressource,
+et donc ca peut etre un param tout simplement avec des ressources internes.
+
+je peut faire une classe separée, ajouter def de ressource qui permet d'utiliser ressource interne.
+genre "ressource_with_dependencies", une autre "ressource", pas useexternalressource.
+elle prend ressource avec param, et te donne acces aux collections typés en const de la classe
+
+dans cette classe faut le moyen de creer des ressource, tu peut pas le faire dans instantiate donc va falloir le declarer.
+d'ou les besoin de la fonction qui permet de savoir quel param tu va utiliser pour la ressource que tu utilise
+
+ne pas casser l'api existant
+
+PAS dans le contexte.
+
+Au moment de creer une ressource, juste t'en cree plusieurs, et au moment de delete, tu delete plusieurs, toutes celles qui dependent.
+
+le gc fonctionne en recursif donc on devrait pouvoir fermer les ressources qui dependent en cascade facilement.
+
+
+
+
+API PUB
+
+class TopUsers extends DependentResource {
+  static dependencies = {
+    stats: {
+      resource: "UserStats",
+      params: (myParams) => ({ region: myParams.region })
+    }
+  };
+
+  instantiate(collections, dependencies, context) {
+    // dependencies.stats : collection de UserStats déjà résolue
+  }
+}
+
+const service: SkipService = {
+  resources: { /* Resource simples, inchangé */ },
+  dependentResources: { TopUsers }, // nouveau champ
+  createGraph(...) { ... }
+};
+
+
+Phase 1 — api.ts
+Pure déclaration de l'API publique, aucune logique. Contenu :
+
+Déclaration de la classe abstraite DependentResource
+Type pour static dependencies
+Extension du type SkipService avec le champ dependentResources
+Documentation TSDoc cohérente avec le reste du fichier
+
+
+Phase 2 — index.ts
+Logique TS de résolution et d'orchestration. Contenu :
+
+Extension de ServiceDefinition pour reconnaître les DependentResource
+Détection de cycles au boot (DFS sur les classes déclarées dans dependentResources)
+buildResource adaptée : si la classe est une DependentResource, on résout d'abord les dépendances récursivement (via le mécanisme existant createReactiveResource côté Skiplang), puis on appelle instantiate(collections, dependencies, context) avec les collections résolues
+Adaptation du binding SkipRuntime_Resource__instantiate pour la nouvelle signature
+
+
+Phase 3 — Skiplang (si nécessaire)
+À ce stade on évalue si tout fonctionne avec les bindings existants. Si oui, rien à faire côté .sk. Si non, on identifie le minimum à ajouter.
+
+
+Ajouts ---
+
+api.ts
+- Trois nouveaux types :
+ResourceDependency qui décrit une dépendance unitaire (le nom de la ressource cible et la fonction de transformation des params)
+ResourceDependencies qui est juste l'objet qui englobe ces ResourceDependency (ce qu'on met dans le static dependencies).
+ResolvedDependencies qui est le pendant côté instanciation : ce que la classe reçoit en argument une fois que le runtime a fait le boulot de résolution.
+
+- Nouvelle interface DependentResource
+- Nouveau champ DependentResources dans SkipService, champ optionnel
+DependentResources est comme resources, une map ou chaque cle string pointe vers un constructeur de dependentResource, mais la classe doit aussi avoir une propriete statique dependencies (sinon ts ne nous laissera pas y acceder, on serait obligé de foutre des as any).
+DependentResource est une interface séparée et pas un héritage de Resource, parce que sa méthode instantiate a 3 arguments (collections, dependencies, context) au lieu de 2.
+
+
+error.ts
+- Nouvelle classe d'erreur SkipDependencyCycleError dans errors.ts pour detection de cycles
+- Nouvelle classe d'erreur SkipUnknownDependencyError dans errors.ts pour detection de resources qui n'existent nulles part mais declarées dans un skipservice
+
+
+
+index.ts
+- Ajout d'un algo de parcours en profondeur, DFS, systeme de detection de cycles style flood-fill mais avec 3 etats visité et valide/ pas visité / en cours de visite, appelé au constructeur de SkipService,
+qui verifie si les dependentResources ont des dependences problematiques qui forment des cycles. On verifie que c'est un DAG
+DAG = Directed Acyclic Graph
+
+- Le DFS en profite aussi a chaque noeud pour verifier que la dependence cible existe quelque part, pour eviter qu'une dependentResource ne declare une dependence a une resource 
+qui n'existe nulle part, trois cas :
+La cible est dans dependentResources → c'est une DependentResource, on continue le parcours récursif sur elle.
+La cible est dans resources (et seulement là) → c'est une Resource simple, c'est une feuille du graphe, on s'arrête là sans erreur.
+La cible n'est nulle part → erreur claire au boot.
+
+- 3 nouvelles methodes :
+buildDependentResource(name, parameters) — strict miroir de buildResource mais sur dependentResources. Retourne une instance de la classe, sans toucher à la résolution des dépendances.
+
+getDependenciesDeclaration(name) — retourne le static dependencies de la classe nommée. Ça permettra au binding de savoir quoi résoudre et comment, sans avoir à manipuler les classes elles-mêmes. C'est a ca que sert la propriete statique & { dependencies: ResourceDependencies }
+
+isDependentResource(name) — méthode utilitaire pour aiguiller. Le binding va devoir choisir entre buildResource et buildDependentResource selon le type de la ressource.
+
+
+
+A FAIRE
+
+Il faut encore que je gére l'instanciation des DependentResource. Aujourd'hui, le binding SkipRuntime_Resource__instantiate côté ToBinding reçoit un handle vers une instance de Resource et appelle son instantiate. Cette mécanique ne fait pas la distinction entre une instance de Resource et de DependentResource, et même si elle le pouvait, elle ne dispose ni du nom de la ressource ni de ses paramètres parents pour orchestrer la résolution des dépendances.
+
+Je compte ajouter un binding parallèle dédié SkipRuntime_DependentResource__instantiate côté index.ts, avec sa déclaration dans binding.ts, son export Skiplang dans FFI.sk, et l'aiguillage côté Runtime.sk dans buildResourcesGraph pour reconnaître le type de ressource et appeler le bon binding.
+
+Pour la résolution des dépendances elle-même, il faut que les sous-ressources soient inscrites dans la chaîne de dirs SKStore (kResourceSessionDir → kResourceAvailablesDir → kResourceCollectionsDir) pour bénéficier du mécanisme de déduplication et de garbage existant.  Le souci, c'est que kResourceSessionDir n'autorise qu'une seule ressource par identifier — donc si on essaie de réutiliser l'id du parent pour la sous-ressource, ça collisionne avec l'inscription du parent lui-même.
+
+J'ai remarqué que kResourceInstance2SubIdDir est défini dans Utils.sk mais n'est utilisé nulle part dans les fichiers que j'ai. Le nom suggère un mapping parentInstanceId → subIds, ce qui ressemble très exactement au mécanisme dont on a parlé pour gérer les sous-ressources internes sans collision avec les sessions clients.
+
+
+QUESTIONS POUR DANIEL
+
+tu m'as dit "tu doit pouvoir utiliser le meme id pour toute les sous-ressources" puis "si ca marche pas avec le meme id, faire un repertoir avec un index". Vu que kResourceSessionDir ne tolère qu'une seule ressource par identifier, on est forcément dans le cas du "répertoire avec un index". Nan ?
+
+
+comment tu vois le code qui inscrit la sous-ressource dans la chaîne SKStore ? On étend createReactiveResource pour qu'elle gère un mode "sous-ressource", ou on écrit une nouvelle fonction Skiplang dédiée à côté ?
+
+
+
+
+
+
+Ne rien mettre dans SkipService
+
+le instantiate peut pas avoir le dependencies, c'est dans instantiate que ca se passe.
+c'est a instantiate de creer les ressources pas skipservice
+
+faire un type union, faire gerer le type union a la place de faire gerer la liste de ressources du type precis tu fait un type union, soit l'un soit l'autre
+l'un n'a pas besoin de deriver de l'autre
+
+ou ressource intervient dans des parametres de types
+si il intervient pas, la maniere dont tu declares instantiate ne changera rien
+
+je devrais tous pouvoir les mettre dans la meme liste, pas obligé de creer une liste separé
+
+pas besoin de check cible qui existe pas dans dfs, si y'a pas, ca plantera
+
+buildresources comme un autre, pas de builddependentresource
+
+c'est quand la resource est construite, elle regarde les dependences qu'elle a, et a ce moment la elle appelle le buildresource sur les dependences
+JAMAIS un truc appelé a part.
+
+faut pas que y ai de fonction en facade
+
+a priori, ne RIEN changer dans api.ts a part la creation du nouveau type de ressource, les fonctions doivent pas changer, pas de nouvelle fonction, surface d'api doit pas changer
+
+quand je fait genre instanciate ressource, c'est lui qui doit tout gerer.
+
+dans l'index, jpeut avoir des trucs privés qui gerent tout ca. mais dans l'api, pas de nouvelle fonctions pour gerer ce truc la.
+l'utilisateur doit pas avoir a declarer, le seul truc qu'il a a faire c'est de declarer des dependences
+
+les dependencies dans nouveau type de classe ressource
+
+le seul truc qui va dans l'api
+- Trois nouveaux types :
+ResourceDependency qui décrit une dépendance unitaire (le nom de la ressource cible et la fonction de transformation des params)
+ResourceDependencies qui est juste l'objet qui englobe ces ResourceDependency (ce qu'on met dans le static dependencies).
+ResolvedDependencies qui est le pendant côté instanciation : ce que la classe reçoit en argument une fois que le runtime a fait le boulot de résolution.
+
+si la resource elle a ce champ qui defini ses dependences, tu la gere de facon a gerer les dependences au moment de l'instancier
+
+c'est une resource comme une autre, elle a les dependences, mais c'est tout, c'est de la tambouille interne
+au moment de l'instantiation, tu verifie le cycle, tu les instantie, et c'est a ce moment la que tu va demander l'instanciation des dependences en recursif qui va te donner des points d'acces au eagercollection correspondants et comme ca tu pourras creer les instances de dependences et tu donne les instances de dependences a l'instanciation
+et normalement ca devrait marcher tout seul.
+
+le dfs est top
+
+a priori on touche juste index vu qu'on fait en majorité ts
+
+fonction recursif au moment de l'instanciation
+tu doit creer une instance de dep avant, et si elle existe deja il la recreera pas (meca interne skipruntime)
+
+pareil faut que t'es les id que t'as cree pour 
+
+quand tu instancie, il faut donner un id qui sert pour referencecount, identifiant d'instance d'une ressource
+si une resource existe deja et qu'elle a meme classe et meme param, pas recree, elle utilise celle qui existe et rajoute son id dans son compteur de ref,
+quand tu instancie une resource, si elle depend de resource, et doit creer un id pour ces ressources la
+en theorie je peut utiliser meme identifiant, mais au cas ou, pour les identifiants pair faut que je puisse recuperer identifiant fixe
+une sous-source c'est potentiellement un nom et des parametres, tu pourrais dependre de 2x la meme resource avec des param differents
+
+quand tu detruit, faut penser a dereferencer les trucs dont je depend.
+
+bon vieux algo recursif a l'instanciation, tu doit tout pouvoir faire sans rentrer dans cote skiplang.
+
+
+
+------
+errors.ts
+
+- supprimé SkipUnknownDependencyError 
+
+
+index.ts
+
+- simplifié le DFS pour enlever unknown dependency check
+- supprimé les méthodes en façade buildDependentResource, getDependenciesDeclaration, isDependentResource dans ServiceDefinition
+- adapté detectDependencyCycles pour parcourir service.resources au lieu de service.dependentResources (puisque ce dernier n'existe plus), avec détection structurelle via "dependencies" in Klass
+- ajouté la résolution récursive des dépendances dans SkipRuntime_Resource__instantiate : détection d'une classe avec dépendances via static dependencies sur le constructeur, transformation des params via la fonction de chaque dépendance, appel de useResource pour chaque sous-ressource, puis appel de instantiate(collections, dependencies, context) à 3 arguments
+- adapté SkipRuntime_ServiceDefinition__buildResource pour stocker un wrapper { instance, params } dans handles au lieu de juste l'instance, pour que les params parents soient accessibles au moment de la résolution
+- adapté la signature de SkipRuntime_deleteResource pour le nouveau type du wrapper
+
+
+api.ts
+
+- supprimé le champ dependantresource du SkipService
+- modifié le type de SkipService.resources en union pour accepter à la fois des Resource simples et des DependentResource avec leur static dependencies
+
+
+
+Runtime.sk - FFI.sk - binding.ts - skipruntime_module.ts
+
+- ajout d'un useResource, similaire a useExternalCollection, qui génère un UUID frais, inscrit la ressource dans kResourceSessionDir, force la cascade avec context.update(), puis lit kResourceCollectionsDir pour récupérer la collection.
+- export FFI SkipRuntime_Context__useResource pour exposer cette fonction côté TS
+- déclaration de la signature dans binding.ts (interface FromBinding)
+- propagation dans skipruntime_module.ts : ajout dans l'interface FromWasm, implémentation dans WasmFromBinding
+- adaptation de toutes les signatures qui prenaient Handle<Resource> pour accepter Handle<{ instance: Resource | DependentResource; params: Json }> à cause du wrapper
+
+
+En implémentant la résolution des dépendances, j'étais bloqué avec l'idée d'utiliser le même id entre une ressource et ses sous-ressources. kResourceSessionDir est typé clé SID vers ResourceDef, donc une seule ressource par id. Si TopUsers est inscrite avec l'id 123, je ne peux pas inscrire UserStats avec le même id puisque la clé est déjà occupée. Donc avec la structure actuelle des dirs, j'ai l'impression que le partage strict d'identifiant est pas possible.
+Pour avancer, je suis parti sur des UUID générés à chaque résolution de dépendance. La dédup marche quand même parce qu'elle se fait au niveau de kResourceAvailablesDir sur la clé (nom, params), pas sur l'identifiant : deux UUID différents qui pointent vers la même (nom, params) produisent une seule instance partagée.
+
+
+Pour résoudre une dépendance, j'ai besoin de récupérer la collection (le dirName) de la sous-ressource depuis TS, pour pouvoir l'envelopper dans un EagerCollection.
+Le soucis, c'est que cette collection est stockée dans kResourceCollectionsDir coté skiplang, et il n'y a aucun binding existant qui expose la lecture de ce dir depuis ts
+Ducoup j'ai ajouté une fonction useResource(name, params) cote skiplang, qui fait les deux etapes : inscription dans kResourceSessionDir, puis lecture de kResourceCollectionsDir pour retourner le dirName. C'est parallele et assez similaire a useExternalCollection.
+
+
+À la compilation tout passe, mais en testant, j'ai un crash InputDirCannotBeWrittenDuringUpdate. Le probleme c'est que la résolution des dépendances se fait pendant que SKStore est en train de calculer la cascade de kResourceSessionDir (parce que je suis dans le mapper de kResourceCollectionsDir quand useResource est appelé). Sauf que SKStore interdit d'écrire dans un dir pendant que sa cascade tourne.
+Deux options pour contourner :
+
+1. créer un nouveau dir séparé, par exemple kInternalResourceSessionDir, dédié aux sous-ressources internes.
+La cascade SKStore est modifiée pour que kResourceAvailablesDir lise les deux dirs sources au lieu d'un seul. Du coup, les ressources qu'elles soient demandées par un client ou par une autre ressource passent toutes par la même chaîne de dédup et de calcul en aval.
+chaine devient
+
+kResourceSessionDir          ← sessions clients
+kInternalResourceSessionDir  ← sous-ressources internes (nouveau)
+    ↓ ↓
+kResourceAvailablesDir       ← lit les deux
+    ↓
+kResourceCollectionsDir
+
+2. Notre useResource crée son propre dir local avec context.mkdir, dans lequel on instancie directement la sous-ressource. Le dirName retourné côté TS pointe vers ce dir local.
+C'est exactement ce que useExternalCollection fait pour les ressources externes.
+mais :
+Pas de déduplication entre clients et sous-ressources : si UserStats(EU) est demandée par un client et utilisée comme dépendance interne, on a deux instances calculées séparément.
+Coût mémoire et CPU potentiellement doublé pour les ressources qui sont à la fois publiques et utilisées en interne.
+
+
+
+
+
+
+
+
+
+
+J'ai gardé une seule classe Resource côté utilisateur, comme tu l'avais demandé. Si une ressource a un champ statique dependencies, elle est traitée comme une DependentResource en interne, sinon c'est une Resource classique. L'utilisateur n'a rien de spécial à déclarer dans son SkipService, tout passe par le même champ resources.
+
+Au boot du service, je fais un DFS sur le graphe des dépendances en lisant les static dependencies de chaque classe. Si je détecte un cycle, je lève une SkipDependencyCycleError et le service refuse de démarrer.
+
+Côté TS, dans SkipRuntime_Resource__instantiate, je détecte si la classe a un champ static dependencies via son constructeur. Si oui, pour chaque dépendance déclarée :
+
+je calcule les params de la sous-ressource avec la fonction de transformation
+j'appelle une nouvelle fonction Skiplang useResource(name, params) que j'ai ajoutée
+j'enveloppe le dirName retourné dans un EagerCollection
+
+Une fois toutes les dépendances résolues, j'appelle instantiate(collections, dependencies, context) avec la signature à 3 arguments.
+Pour stocker les params parents et les rendre accessibles au moment de la résolution, j'ai modifié le wrapper qu'on enregistre dans handles côté TS : au lieu de stocker juste l'instance, je stocke { instance, params }.
+
+Comme aucun binding existant ne permettait à TS de lire kResourceCollectionsDir, j'ai ajouté useResource(name, params) dans Runtime.sk. Elle inscrit la ResourceDef dans kResourceSessionDir, force la cascade avec context.update(), puis lit kResourceCollectionsDir pour récupérer le dirName. C'est le pattern parallèle à useExternalCollection qui fait ça pour les ressources externes.
+
+Sur les identifiants
+Tu m'avais suggéré de partager l'identifiant entre une ressource et ses sous-ressources, mais kResourceSessionDir est typé SID → ResourceDef, donc une seule ressource par identifiant. Si TopUsers est inscrite avec id 123, je ne peux pas y inscrire UserStats avec le même id. J'ai donc utilisé des UUID génerés à chaque résolution. La dédup marche quand même parce qu'elle se fait sur (name, params) dans kResourceAvailablesDir.
+
+Tout compile, tous les tests existants passent, mais quand je teste la feature elle-même, ça crash avec InputDirCannotBeWrittenDuringUpdate. Le souci c'est que useResource essaie d'écrire dans kResourceSessionDir au moment où la cascade SKStore est déjà en cours sur ce dir. Donc SKStore refuse l'écriture.
+
+
+deux options 
+
+1. créer un nouveau dir séparé, par exemple kInternalResourceSessionDir, dédié aux sous-ressources internes.
+La cascade SKStore est modifiée pour que kResourceAvailablesDir lise les deux dirs sources au lieu d'un seul. Du coup, les ressources qu'elles soient demandées par un client ou par une autre ressource passent toutes par la même chaîne de dédup et de calcul en aval.
+chaine devient
+
+kResourceSessionDir          ← sessions clients
+kInternalResourceSessionDir  ← sous-ressources internes (nouveau)
+    ↓ ↓
+kResourceAvailablesDir       ← lit les deux
+    ↓
+kResourceCollectionsDir
+
+2. Notre useResource crée son propre dir local avec context.mkdir, dans lequel on instancie directement la sous-ressource. Le dirName retourné côté TS pointe vers ce dir local.
+C'est exactement ce que useExternalCollection fait pour les ressources externes.
+mais :
+Pas de déduplication entre clients et sous-ressources : si UserStats(EU) est demandée par un client et utilisée comme dépendance interne, on a deux instances calculées séparément.
+Coût mémoire et CPU potentiellement doublé pour les ressources qui sont à la fois publiques et utilisées en interne.
+
+
+pas de useresource, rappeler instanciate resource
+il faut que ca fasse ce que fait instanciate resource.
+ca instancie une resource
+je peut rajouter une ft pour recup une eagercollection associee si je veux mais faut que ca appelle instanciate
+
+c'est instanciate qui instancie la resource, si je fait pas instanciate avant mon eagercollection a pas de sens
+strictement rien a voir avec useexternalservice
+ca marchera pas
+tu cree pas le truc a la volee, tu cree le truc en prephase, tu preload les resources, quand tu fait instanciate resource, tu doit lister les resources sur lesquels tu depends, et tu refait un instanciate resource sur celles la
+le dernier truc que je doit faire c'est creer la resource finale, et c'est pas la resource finale qui cree les resources partagees
+
+pour les fresh uuid pas besoin, autant faire du suffixage, plus simple
+
+
+
+
+
+Client appelle service.instantiateResource("abc", "TopUsers", params)
+     │
+     ▼
+PRÉPHASE (côté TS, avant le binding) :
+   - Lire la classe TopUsers depuis service.resources
+   - Si elle a static dependencies, pour chaque dépendance :
+       1. Calculer childParams via dep.params(params)
+       2. Calculer un childId par suffixage : "abc__<depName>"
+       3. Appeler récursivement instantiateResource(childId, dep.resource, childParams)
+         (qui fait sa propre préphase si la sous-ressource a aussi des dépendances)
+     │
+     ▼
+INSTANCIATION DE LA RESSOURCE FINALE :
+   - Appel binding.SkipRuntime_Runtime__createResource("abc", "TopUsers", params)
+     comme avant
+     │
+     ▼
+PENDANT QUE TopUsers S'INSTANCIE (côté TS, dans Resource__instantiate) :
+   - Si elle a static dependencies, lire les collections déjà calculées
+     des sous-ressources via une fonction de lecture seule
+   - Appeler instance.instantiate(collections, dependencies, context)
+
+
+
+MODIF INSTANCIATERESOURCE
+
+Avant d'appeler le binding pour créer la ressource, on appelle une fonction preloadDependencies.
+preloadDependencies lit la classe via getResourceClass (méthode que j'ai ajouté a ServiceDefinition)
+Si la classe n'existe pas ou n'a pas de static dependencies, on retourne immédiatement.
+Pour chaque dépendance, on calcule les params via la fonction de transformation et on construit un id par suffixage (${parentId}__${depName}).
+On appelle récursivement instantiateResource sur la dépendance. Si la dépendance est elle-même une DependentResource, sa propre préphase se déclenchera, et ainsi de suite.
+À la fin de preloadDependencies, toutes les sous-ressources sont inscrites et calculées.
+Seulement après, on appelle le binding SkipRuntime_Runtime__createResource pour la ressource finale.
+
+
+
+1. Rollback
+- Fonction useResource retirée de Runtime.sk
+- Export SkipRuntime_Context__useResource retiré de FFI.sk
+- Signature retirée de binding.ts
+- Implémentation retirée de skipruntime_module.ts (interface FromWasm et classe WasmFromBinding)
+- Déclaration externe, fonction wrapper et enregistrement retirés de tojs.cc (addon Native)
+- SkipRuntime_Resource__instantiate remis à son comportement initial 
+
+2. Fonction lecture seule - Une nouvelle fonction getResourceCollection a été ajoutée, qui fait uniquement la lecture de kResourceCollectionsDir sans rien écrire
+- Implémentation Skiplang dans Runtime.sk (lit kResourceCollectionsDir à la clé (name, params), retourne le dirName)
+- Export FFI SkipRuntime_Context__getResourceCollection dans FFI.sk
+- Signature dans binding.ts
+- Implémentation dans skipruntime_module.ts (interface FromWasm et classe WasmFromBinding)
+- Déclaration externe, fonction wrapper GetResourceCollectionOfContext et enregistrement dans tojs.cc
+
+3. Prephase TS
+- Nouvelle méthode privée preloadDependencies qui parcourt récursivement les static dependencies de la classe et appelle instantiateResource sur chaque sous-ressource avec un id suffixé ${parentId}__${depName}
+- Récursion implicite : si une sous-ressource est elle-même une DependentResource, sa propre préphase se déclenche au moment de son instanciation
+- Suffixage des ids retenu plutôt qu'UUID frais ou id partagé (le tuteur a tranché : "plus simple")
+
+4. Utilisation des collections résolues
+- Ressource simple sans static dependencies : comportement strictement identique à avant (instance.instantiate(collections, context))
+- DependentResource : pour chaque dépendance déclarée, lecture du dirName via getResourceCollection, enveloppement dans un EagerCollection, puis appel instance.instantiate(collections, resolved, context) à 3 arguments
+
+5. Unit Tests
+- testDependentResourceBasic : profondeur 1
+- testDependentResourceNested : profondeur 2 (chaîne)
+- testDependentResourceCycle : détection de cycle au boot
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

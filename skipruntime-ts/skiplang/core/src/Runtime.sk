@@ -1128,6 +1128,21 @@ fun getReactiveResource(
   graphHdl.get(context, definition);
 }
 
+fun getResourceCollection(
+  context: mutable SKStore.Context,
+  name: String,
+  params: SKJSON.CJSON,
+): String {
+  graphHdl = SKStore.EHandle(
+    ResourceDef::keyType,
+    ResourceInfo::type,
+    kResourceCollectionsDir,
+  );
+  resourceDef = ResourceDef(name, params);
+  resourceInfo = graphHdl.get(context, resourceDef);
+  resourceInfo.collection.getId()
+}
+
 fun checkGarbage(context: mutable SKStore.Context): void {
   garbageHdl = SKStore.EHandle(
     SKStore.SID::keyType,

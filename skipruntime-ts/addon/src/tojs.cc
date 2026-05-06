@@ -16,6 +16,7 @@ char* SkipRuntime_Context__createLazyCollection(SKLazyCompute lazyCompute);
 CJArray SkipRuntime_Context__jsonExtract(CJObject json, char* pattern);
 char* SkipRuntime_Context__useExternalResource(char* service, char* identifier,
                                                CJObject json);
+char* SkipRuntime_Context__getResourceCollection(char* name, void* params);
 
 SKMapper SkipRuntime_createMapper(int32_t ref);
 SKLazyCompute SkipRuntime_createLazyCompute(int32_t ref);
@@ -189,6 +190,32 @@ void UseExternalResourceOfContext(const FunctionCallbackInfo<Value>& args) {
         ToSKString(isolate, args[0].As<String>()),
         ToSKString(isolate, args[1].As<String>()),
         args[2].As<External>()->Value());
+    args.GetReturnValue().Set(FromUtf8(isolate, skcollection));
+  });
+}
+
+void GetResourceCollectionOfContext(const FunctionCallbackInfo<Value>& args) {
+  Isolate* isolate = args.GetIsolate();
+  HandleScope scope(isolate);
+  if (args.Length() != 2) {
+    isolate->ThrowException(
+        Exception::TypeError(FromUtf8(isolate, "Must have two parameters.")));
+    return;
+  };
+  if (!args[0]->IsString()) {
+    isolate->ThrowException(Exception::TypeError(
+        FromUtf8(isolate, "The first parameter must be a string.")));
+    return;
+  }
+  if (!args[1]->IsExternal()) {
+    isolate->ThrowException(Exception::TypeError(
+        FromUtf8(isolate, "The second parameter must be a pointer.")));
+    return;
+  }
+  NatTryCatch(isolate, [&args](Isolate* isolate) {
+    char* skcollection = SkipRuntime_Context__getResourceCollection(
+        ToSKString(isolate, args[0].As<String>()),
+        args[1].As<External>()->Value());
     args.GetReturnValue().Set(FromUtf8(isolate, skcollection));
   });
 }
@@ -990,6 +1017,8 @@ void GetToJSBinding(const FunctionCallbackInfo<Value>& args) {
               JSONExtractOfContext);
   AddFunction(isolate, binding, "SkipRuntime_Context__useExternalResource",
               UseExternalResourceOfContext);
+  AddFunction(isolate, binding, "SkipRuntime_Context__getResourceCollection",
+            GetResourceCollectionOfContext);
   //
   AddFunction(isolate, binding, "SkipRuntime_createMapper", CreateMapper);
   AddFunction(isolate, binding, "SkipRuntime_createLazyCompute",

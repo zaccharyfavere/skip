@@ -53,3 +53,10 @@ export class SkipNonUniqueValueError extends SkipError {}
  * @hideconstructor
  */
 export class SkipResourceInstanceInUseError extends SkipError {}
+
+/**
+ * Exception indicating a cycle in the `dependencies` declarations of
+ * `DependentResource` classes within a `SkipService`.
+ * @hideconstructor
+ */
+export class SkipDependencyCycleError extends SkipError {}

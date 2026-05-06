@@ -281,6 +281,109 @@ const oneToOneMapperService: SkipService<Input_NN, Input_NN> = {
   },
 };
 
+//// testDependentResource
+
+class Increment implements Mapper<string, number, string, number> {
+  constructor(private readonly delta: number) {}
+
+  mapEntry(key: string, values: Values<number>): Iterable<[string, number]> {
+    return Array([key, values.getUnique() + this.delta]);
+  }
+}
+
+// just a simple resource that take input collection and returns it
+class PassThroughResource implements Resource<Input_SN> {
+  instantiate(collections: Input_SN): EagerCollection<string, number> {
+    return collections.input;
+  }
+}
+
+// DependentResource level 1 (just a resource with a static dependencies declared), depends on PassThroughResource
+// takes the collection returned by PassThroughResource and adds 10 to each value (ex: input [["1", [5]]], output [["1", [15]]])
+class IncrementByTenResource {
+  static dependencies = {
+    base: {
+      resource: "passThrough",
+      params: (_p: Json) => ({}),
+    },
+  };
+
+  instantiate(
+    _collections: Input_SN,
+    dependencies: { base: EagerCollection<string, number> },
+  ): EagerCollection<string, number> {
+    return dependencies.base.map(Increment, 10);
+  }
+}
+
+// DependentResource level 2, depends on IncrementByTenResource (which depends on PassThroughResource)
+// adds 100 to each value of the incrementByTen collection
+class IncrementByHundredResource {
+  static dependencies = {
+    intermediate: {
+      resource: "incrementByTen",
+      params: (_p: Json) => ({}),
+    },
+  };
+
+  instantiate(
+    _collections: Input_SN,
+    dependencies: { intermediate: EagerCollection<string, number> },
+  ): EagerCollection<string, number> {
+    return dependencies.intermediate.map(Increment, 100);
+  }
+}
+
+const dependentResourceService: SkipService<Input_SN, Input_SN> = {
+  initialData: { input: [] },
+  resources: {
+    passThrough: PassThroughResource,
+    incrementByTen: IncrementByTenResource as any,
+    incrementByHundred: IncrementByHundredResource as any,
+  },
+  createGraph(inputCollections: Input_SN) {
+    return inputCollections;
+  },
+};
+
+// Service with a deliberate Cycle error A depends on B that depends on A
+class CycleA {
+  static dependencies = {
+    other: { resource: "cycleB", params: (_p: Json) => ({}) },
+  };
+
+  instantiate(
+    _collections: Input_SN,
+    deps: { other: EagerCollection<string, number> },
+  ): EagerCollection<string, number> {
+    return deps.other;
+  }
+}
+
+class CycleB {
+  static dependencies = {
+    other: { resource: "cycleA", params: (_p: Json) => ({}) },
+  };
+  
+  instantiate(
+    _collections: Input_SN,
+    deps: { other: EagerCollection<string, number> },
+  ): EagerCollection<string, number> {
+    return deps.other;
+  }
+}
+
+const cycleService: SkipService<Input_SN, Input_SN> = {
+  initialData: { input: [] },
+  resources: {
+    cycleA: CycleA as any,
+    cycleB: CycleB as any,
+  },
+  createGraph(inputCollections: Input_SN) {
+    return inputCollections;
+  },
+};
+
 //// testSize
 
 class SizeMapper implements Mapper<number, number, number, number> {
@@ -1291,6 +1394,39 @@ export function initTests(
     } finally {
       await service.close();
     }
+  });
+
+  it("testDependentResourceBasic", async () => {
+    const service = await initService(dependentResourceService);
+    try {
+      await service.update("input", [["1", [5]]]);
+      // 5 + 10 (passThrough -> incrementByTen)
+      expect(await service.getArray("incrementByTen", "1")).toEqual([15]);
+    } finally {
+      await service.close();
+    }
+  });
+
+  it("testDependentResourceNested", async () => {
+    const service = await initService(dependentResourceService);
+    try {
+      await service.update("input", [["1", [5]]]);
+      // 5 + 10 + 100 = 115 (passThrough -> incrementByTen -> incrementByHundred)
+      expect(await service.getArray("incrementByHundred", "1")).toEqual([115]);
+    } finally {
+      await service.close();
+    }
+  });
+
+  it("testDependentResourceCycle", async () => {
+    let caught: unknown = null;
+    try {
+      await initService(cycleService);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).not.toEqual(null);
+    expect((caught as Error).message).toInclude("Dependency cycle detected");
   });
 
   it("valueMapper", async () => {

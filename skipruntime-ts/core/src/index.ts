@@ -37,6 +37,9 @@ import {
   type SkipService,
   type Watermark,
   type ExternalService,
+  type DependentResource,
+  type ResourceDependencies,
+  type ResolvedDependencies,
 } from "./api.js";
 
 import {
@@ -45,6 +48,7 @@ import {
   SkipNonUniqueValueError,
   SkipResourceInstanceInUseError,
   SkipUnknownCollectionError,
+  SkipDependencyCycleError,
 } from "./errors.js";
 import { type Notifier, type Handle, type FromBinding } from "./binding.js";
 
@@ -100,9 +104,68 @@ export class ServiceDefinition {
   constructor(
     private service: SkipService,
     private readonly externals: Map<string, ExternalService> = new Map(),
-  ) {}
+  ) {
+    this.detectDependencyCycles();
+  }
 
-  buildResource(name: string, parameters: Json): Resource {
+  /**
+   * Detect cycles in `dependencies` declarations of resources registered in
+   * `service.resources`. Throws SkipDependencyCycleError if any cycle is found,
+   * including self-references.
+   *
+   * Resources without a static `dependencies` field are treated as leaves.
+   */
+  private detectDependencyCycles(): void {
+    const resources = this.service.resources;
+
+    // Visited states for the DFS.
+    // "visiting" = node is currently on the DFS stack (cycle if revisited).
+    // "visited"  = node has been fully explored (safe to skip).
+    const state = new Map<string, "visiting" | "visited">();
+
+    const visit = (name: string, path: string[]): void => {
+      const status = state.get(name);
+      if (status === "visited") return;
+      if (status === "visiting") {
+        const cycleStart = path.indexOf(name);
+        const cycle = path.slice(cycleStart).concat(name).join(" -> ");
+        throw new SkipDependencyCycleError(
+          `Dependency cycle detected: ${cycle}`,
+        );
+      }
+
+      const Klass = resources[name];
+      // Unknown name or plain Resource (no `dependencies`) -> leaf.
+      if (!Klass || !("dependencies" in Klass)) return;
+
+      state.set(name, "visiting");
+      const deps = (Klass as { dependencies: ResourceDependencies }).dependencies;
+      for (const dep of Object.values(deps)) {
+        visit(dep.resource, [...path, name]);
+      }
+      state.set(name, "visited");
+    };
+
+    for (const name of Object.keys(resources)) {
+      visit(name, []);
+    }
+  }
+
+  /**
+   * Returns the constructor of a resource declared in `service.resources`,
+   * or undefined if the name is not registered.
+   *
+   * Used by instantiateResource to read the static `dependencies` field for
+   * the dependency pre-phase.
+   * 
+   * @param name - The name of the resource to look up.
+   * @returns The resource constructor, or undefined if not registered.
+   */
+  getResourceClass(name: string): unknown {
+    return this.service.resources[name];
+  }
+
+  buildResource(name: string, parameters: Json): Resource | DependentResource {
     const builder = this.service.resources[name];
     if (!builder) throw new Error(`Resource '${name}' not exist.`);
     return new builder(parameters);
@@ -586,12 +649,20 @@ export class ServiceInstance {
    * @param params - Resource parameters, which will be passed to the resource constructor specified in this `SkipService`'s `resources` field
    * @returns The resulting promise
    */
-  instantiateResource(
+  async instantiateResource(
     identifier: string,
     resource: string,
     params: Json,
   ): Promise<void> {
     this.refs.setFork(this.forkName);
+    // Pre-phase: instantiate dependencies recursively before the resource itself.
+    // The class is read from the service definition; if it has a static
+    // `dependencies` field, each dependency is instantiated with a derived
+    // identifier so it lives in kResourceSessionDir with the parent.
+    await this.preloadDependencies(identifier, resource, params);
+    // Now that dependencies are loaded, instantiate the
+    // resource itself. When its `instantiate` runs, sub-resources are already
+    // available in kResourceCollectionsDir.
     return this.refs.runAsync(() =>
       this.refs.binding.SkipRuntime_Runtime__createResource(
         identifier,
@@ -600,6 +671,24 @@ export class ServiceInstance {
       ),
     );
   }
+
+private async preloadDependencies(
+  parentId: string,
+  resourceName: string,
+  parentParams: Json,
+): Promise<void> {
+  const Klass = this.definition.getResourceClass(resourceName);
+  if (!Klass) return;
+  const deps = (Klass as { dependencies?: ResourceDependencies }).dependencies;
+  if (!deps) return;
+  for (const [depName, dep] of Object.entries(deps)) {
+    const childParams = dep.params(parentParams);
+    const childId = `${parentId}__${depName}`;
+    // Recursive call : if the sub-resource itself has dependencies,
+    // its own pre-phase runs before its own instantiation.
+    await this.instantiateResource(childId, dep.resource, childParams);
+  }
+}
 
   /**
    * Creates if not exists and get all current values of specified resource
@@ -1099,11 +1188,12 @@ export class ToBinding {
   // Resource
 
   SkipRuntime_Resource__instantiate(
-    skresource: Handle<Resource>,
+    skresource: Handle<{ instance: Resource | DependentResource; params: Json }>,
     skcollections: Pointer<Internal.CJObject>,
   ): string {
     const skjson = this.getJsonConverter();
-    const resource = this.handles.get(skresource);
+    const wrapped = this.handles.get(skresource);
+    const { instance, params: parentParams } = wrapped;
     const collections: NamedCollections = {};
     const keysIds = skjson.importJSON(skcollections) as {
       [key: string]: string;
@@ -1111,11 +1201,42 @@ export class ToBinding {
     for (const [key, name] of Object.entries(keysIds)) {
       collections[key] = new EagerCollectionImpl<Json, Json>(name, this);
     }
-    const collection = resource.instantiate(collections, new ContextImpl(this));
+    const context = new ContextImpl(this);
+
+    // Detect resources with declared dependencies via the static field
+    // on their constructor. basic Resources don't have it.
+    const ctor = instance.constructor as { dependencies?: ResourceDependencies };
+    const declaredDeps = ctor.dependencies;
+
+    if (!declaredDeps) {
+      const collection = (instance as Resource).instantiate(collections, context);
+      return EagerCollectionImpl.getName(collection);
+    }
+
+    // DependentResource: dependencies were already instantiated during the
+    // pre-phase in instantiateResource. We just read their already-loaded
+    // collections from kResourceCollectionsDir via getResourceCollection.
+    const resolved: ResolvedDependencies = {};
+    for (const [localName, dep] of Object.entries(declaredDeps)) {
+      const childParams = dep.params(parentParams);
+      const dirName = this.binding.SkipRuntime_Context__getResourceCollection(
+        dep.resource,
+        skjson.exportJSON(childParams),
+      );
+      resolved[localName] = new EagerCollectionImpl<Json, Json>(dirName, this);
+    }
+
+    const collection = (instance as DependentResource).instantiate(
+      collections,
+      resolved,
+      context,
+    );
     return EagerCollectionImpl.getName(collection);
   }
 
-  SkipRuntime_deleteResource(resource: Handle<Resource>): void {
+  SkipRuntime_deleteResource(
+    resource: Handle<{ instance: Resource | DependentResource; params: Json }>,
+  ): void {
     this.handles.deleteHandle(resource);
   }
 
@@ -1174,12 +1295,13 @@ export class ToBinding {
   ): Pointer<Internal.Resource> {
     const skjson = this.getJsonConverter();
     const service = this.handles.get(skservice);
-    const resource = service.buildResource(
-      name,
-      skjson.importJSON(skparams) as Json,
-    );
+    const params = skjson.importJSON(skparams) as Json;
+    const instance = service.buildResource(name, params);
+    // Wrap instance with its params so that DependentResource resolution
+    // can transform parent params into child params at instantiation time.
+    const wrapped = { instance, params };
     return this.binding.SkipRuntime_createResource(
-      this.handles.register(resource),
+      this.handles.register(wrapped),
     );
   }
 
