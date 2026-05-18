@@ -33,7 +33,26 @@ class ResourceCollections(
   value: SKStore.EHandle<SKStore.SID, ResourceInfo>,
 ) extends SKStore.File
 
-class ServiceDefinition(runId: String, service: Service) extends SKStore.File
+// Configuration of the resource garbage collector.
+// - enabled: when false, sweeps (TTL expiration and capacity
+//   eviction) are skipped. forceGarbageCollection() still works.
+// - ttlMillis: how long a resource may stay in the garbage queue before
+//   being collected (default 30s, the good old hard-coded value).
+// - maxGarbageSize: optional cap on the number of entries in the garbage
+//   queue. When the cap is exceeded, the oldest entries are evicted on
+//   the next checkGarbage pass. None means no cap.
+// - logsEnabled: when true, the GC emits print_debug traces on what he does.
+class GCConfig{
+  enabled: Bool = true,
+  ttlMillis: Int = 30000,
+  maxGarbageSize: ?Int = Some(0),
+  logsEnabled: Bool = false,
+} extends SKStore.File
+
+class ServiceDefinition(
+  runId: String,
+  service: Service,
+) extends SKStore.File
 
 class ServiceInputs(
   service: Service,
@@ -150,11 +169,9 @@ fun buildResourcesGraph(
   )
 }
 
+
 fun initService(service: Service): Result<Array<Waitable>, .Exception> {
-  if (!SKStore.gHasContext()) {
-    SKStore.gContextInit(initCtx());
-  };
-  runId = Ksuid::create().toString();
+  runId = `init-${SKStore.genSym(0)}`;
   runWithResult(context ~> {
     if (context.unsafeMaybeGetEagerDir(kSessionDir) is None()) {
       sessionHdl = context.mkdir(
@@ -162,6 +179,12 @@ fun initService(service: Service): Result<Array<Waitable>, .Exception> {
         ServiceDefinition::type,
         kSessionDir,
         Array[(SKStore.UnitID::singleton, ServiceDefinition(runId, service))],
+      );
+      _ = context.mkdir(
+        SKStore.UnitID::keyType,
+        GCConfig::type,
+        kGCConfigDir,
+        Array[(SKStore.UnitID::singleton, GCConfig{})],
       );
       servicesHdl = sessionHdl
         .map(
@@ -927,6 +950,7 @@ fun closeReactiveResource(
     if (garbageHdl.maybeGet(context, sid).isSome()) return void;
     time = Time.time_ms();
     garbageHdl.writeArray(context, sid, Array[SKStore.IntFile(time)]);
+    gcLog(getGCConfig(context), "resource queued | sid=" + identifier);
     if (update) updateContext(context)
   }
 }
@@ -994,6 +1018,7 @@ fun subscribe(
     );
     if (garbageHdl.maybeGet(context, sid).isSome()) {
       garbageHdl.writeArray(context, sid, Array[]);
+      gcLog(getGCConfig(context), "resource resurrected | sid=" + identifier);
       context.update();
     };
     checkGarbage(context);
@@ -1128,7 +1153,119 @@ fun getReactiveResource(
   graphHdl.get(context, definition);
 }
 
+// Garbage Collector
+
+// Reads the current GC config. Falls back to defaults if no service is loaded
+fun getGCConfig(context: mutable SKStore.Context): GCConfig {
+  configHdl = SKStore.EHandle(
+    SKStore.UnitID::keyType,
+    GCConfig::type,
+    kGCConfigDir,
+  );
+  configHdl.maybeGet(context, SKStore.UnitID::singleton) match {
+  | Some(config) -> config
+  | None() -> GCConfig{}
+  }
+}
+
+// Updates the GC config singleton. Called from FFI when the ts user
+// wants to change the GC config at runtime.
+fun setGCConfig(
+  context: mutable SKStore.Context,
+  newConfig: GCConfig,
+): void {
+  configHdl = SKStore.EHandle(
+    SKStore.UnitID::keyType,
+    GCConfig::type,
+    kGCConfigDir,
+  );
+  configHdl.writeArray(
+    context,
+    SKStore.UnitID::singleton,
+    Array[newConfig],
+  );
+}
+
+class GCConfigParseException(field: String, expected: String) extends .Exception {
+  fun getMessage(): String {
+    `setGCConfig: invalid type for field '${this.field}', expected ${this.expected}`
+  }
+}
+
+// Merges a partial GCConfig (received via FFI as a CJObject) into the
+// current one. Unspecified fields keep their current value.
+// Fields with the wrong type cause an exception.
+// Unknown fields are ignored.
+fun mergeGCConfig(
+  current: GCConfig,
+  partial: SKJSON.CJObject,
+): GCConfig {
+  partial match {
+  | SKJSON.CJObject(fields) ->
+    enabled = current.enabled;
+    ttlMillis = current.ttlMillis;
+    maxGarbageSize = current.maxGarbageSize;
+    logsEnabled = current.logsEnabled;
+    for (key => value in fields) {
+      key match {
+      | "enabled" ->
+        value match {
+        | SKJSON.CJBool(b) -> !enabled = b
+        | _ -> throw GCConfigParseException("enabled", "boolean")
+        }
+      | "ttlMillis" ->
+        value match {
+        | SKJSON.CJInt(n) -> !ttlMillis = n
+        | SKJSON.CJFloat(n) -> !ttlMillis = n.toInt()
+        | _ -> throw GCConfigParseException("ttlMillis", "number")
+        }
+      | "maxGarbageSize" ->
+        value match {
+        | SKJSON.CJNull() -> !maxGarbageSize = None()
+        | SKJSON.CJInt(n) -> !maxGarbageSize = Some(n)
+        | SKJSON.CJFloat(n) -> !maxGarbageSize = Some(n.toInt())
+        | _ -> throw GCConfigParseException("maxGarbageSize", "number or null")
+        }
+      | "logsEnabled" ->
+        value match {
+        | SKJSON.CJBool(b) -> !logsEnabled = b
+        | _ -> throw GCConfigParseException("logsEnabled", "boolean")
+        }
+      | _ -> void  // unknown field, tolerated
+      }
+    };
+    GCConfig{
+      enabled,
+      ttlMillis,
+      maxGarbageSize,
+      logsEnabled,
+    }
+  }
+}
+
+// Helper to print the garbage collector's logs if it is enabled
+fun gcLog(config: GCConfig, msg: String): void {
+  if (config.logsEnabled) {
+    print_debug("[GC] " + msg)
+  }
+}
+
+// Sweeps the resource garbage collector queue : destroy every resource
+// who the ttl in the queue has expired. 
+// Called from a subscribe, createReactiveResource and updateContext.
 fun checkGarbage(context: mutable SKStore.Context): void {
+  // Read the current GC config in the user-given lambda passed by
+  // TypeScript.
+  config = getGCConfig(context);
+
+  // Skip the sweep entirely when the GC is disabled.
+  if (!config.enabled) {
+    gcLog(config, "disabled, sweep skipped");
+    return void
+  };
+
+  // - garbageHdl: tombstones (session id -> orphan timestamp)
+  // - resourceHdl: active resource definitions (session id -> ResourceDef)
   garbageHdl = SKStore.EHandle(
     SKStore.SID::keyType,
     SKStore.IntFile::type,
@@ -1139,20 +1276,69 @@ fun checkGarbage(context: mutable SKStore.Context): void {
     ResourceDef::type,
     kResourceSessionDir,
   );
+
+  // get and freeze the current time once so every comparison in the sweep
+  // uses the same reference timestamp.
   time = Time.time_ms();
+
+  // Collect expired session ids first, destroy them in a second pass.
+  // Splitting the two passes avoids mutating the directory while iterating.
   destroyed = mutable Vector[];
   garbageHdl.items(context).each(kf -> {
     kf.i1.next().each(f -> {
       suppressed = f.value;
-      if (time - suppressed > kGarbageMillis) {
+      if (time - suppressed > config.ttlMillis) {
         key = kf.i0;
         destroyed.push(key);
+        // Effective destruction of the resource: writing an empty array
+        // is SKStore's way of erasing the entry. Reactive cascades will
+        // then propagate the deletion to dependent directories.
         resourceHdl.writeArray(context, key, Array[]);
       }
     })
   });
+
+  // Erase the tombstones of everything we just destroyed.
   destroyed.each(key -> garbageHdl.writeArray(context, key, Array[]));
-  if (!destroyed.isEmpty()) context.update();
+
+  // Garbage max size eviction: if a max size is set in the config
+  // and the queue exceeds it, destroy the oldest entries (by creation timestamp)
+  // until we are back at the cap. Collect all entries, sort them by timestamp,
+  // take the K oldest, and remove them in a single pass.
+  config.maxGarbageSize match {
+  | Some(maxSize) ->
+    excess = garbageHdl.size(context) - maxSize;
+    if (excess > 0) {
+      // Snapshot the queue as (sid, timestamp) pairs.
+      entries = mutable Vector<(SKStore.SID, Int)>[];
+      garbageHdl.items(context).each(kf -> {
+        kf.i1.next().each(f -> {
+          entries.push((kf.i0, f.value))
+        })
+      });
+      // Oldest first
+      entries.sortBy(e ~> e.i1);
+      // Evict the K oldest
+      entries.take(excess).each(entry -> {
+        sid = entry.i0;
+        destroyed.push(sid);
+        resourceHdl.writeArray(context, sid, Array[]);
+        garbageHdl.writeArray(context, sid, Array[]);
+      })
+    }
+  | None() -> void
+  };
+
+  // Notify SKStore that the context changed, but only if we actually
+  // destroyed something.
+  if (!destroyed.isEmpty()) {
+      context.update();
+      gcLog(
+        config,
+        "sweep done | destroyed=" + destroyed.size().toString() +
+          " | queue_size=" + garbageHdl.size(context).toString(),
+      );
+    };
 }
 
 fun updateContext(context: mutable SKStore.Context): void {

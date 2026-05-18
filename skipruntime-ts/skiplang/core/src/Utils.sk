@@ -3,6 +3,11 @@ module SkipRuntime;
 const kSessionDir: SKStore.DirName = SKStore.DirName::create(
   "/sk_prv/sessions/",
 );
+
+const kGCConfigDir: SKStore.DirName = SKStore.DirName::create(
+  "/sk_prv/config/",
+);
+
 const kTokenDir: SKStore.DirName = SKStore.DirName::create("/sk_prv/tokens/");
 const kGraphDir: SKStore.DirName = SKStore.DirName::create("/sk_prv/graph/");
 const kResourceSessionDir: SKStore.DirName = SKStore.DirName::create(

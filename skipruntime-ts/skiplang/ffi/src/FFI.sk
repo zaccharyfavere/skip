@@ -772,6 +772,50 @@ fun closeResourceStreamOfRuntime(streams: SKJSON.CJArray): Float {
   }
 }
 
+@export("SkipRuntime_setGCConfig")
+fun setGCConfigOfRuntime(partial: SKJSON.CJSON): Float {
+  partial match {
+  | obj @ SKJSON.CJObject _ ->
+    runWithResult(context ~> {
+      current = getGCConfig(context);
+      newConfig = mergeGCConfig(current, obj);
+      setGCConfig(context, newConfig);
+    }) match {
+    | Success _ -> 0.0
+    | Failure(err) -> getErrorHdl(err)
+    }
+  | _ ->
+    getErrorHdl(InvariantViolation("setGCConfig: expected an object"))
+  }
+}
+
+// Not very useful, used for tests only
+@export("SkipRuntime_getGCConfig")
+fun getGCConfigOfRuntime(): SKJSON.CJSON {
+  runWithResult(context ~> {
+    config = getGCConfig(context);
+    fields = SKJSON.CJFields::create(
+      Array[
+        ("enabled", SKJSON.CJBool(config.enabled)),
+        ("ttlMillis", SKJSON.CJInt(config.ttlMillis)),
+        (
+          "maxGarbageSize",
+          config.maxGarbageSize match {
+          | Some(n) -> SKJSON.CJInt(n)
+          | None() -> SKJSON.CJNull()
+          },
+        ),
+        ("logsEnabled", SKJSON.CJBool(config.logsEnabled)),
+      ],
+      x ~> x,
+    );
+    SKJSON.CJObject(fields)
+  }) match {
+  | Success(json) -> json
+  | Failure(err) -> SKJSON.CJFloat(getErrorHdl(err))
+  }
+}
+
 /************ Context ****************/
 
 @export("SkipRuntime_Context__createLazyCollection")

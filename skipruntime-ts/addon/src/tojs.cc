@@ -60,6 +60,8 @@ double SkipRuntime_Runtime__abortFork();
 uint32_t SkipRuntime_Runtime__forkExists(char* input);
 CJSON SkipRuntime_Runtime__reload(SKService service);
 double SkipRuntime_Runtime__closeResourceStreams(CJArray streams);
+double SkipRuntime_setGCConfig(CJObject config);
+CJSON SkipRuntime_getGCConfig();
 }
 
 using skbinding::AddFunction;
@@ -977,6 +979,36 @@ void CloseResourceStreamsOfRuntime(const FunctionCallbackInfo<Value>& args) {
   });
 }
 
+void SetGCConfig(const FunctionCallbackInfo<Value>& args) {
+  Isolate* isolate = args.GetIsolate();
+  HandleScope scope(isolate);
+  if (args.Length() != 1) {
+    isolate->ThrowException(
+        Exception::TypeError(FromUtf8(isolate, "Must have one parameter.")));
+    return;
+  }
+  if (!args[0]->IsExternal()) {
+    isolate->ThrowException(Exception::TypeError(
+        FromUtf8(isolate, "The parameter must be a pointer.")));
+    return;
+  }
+  NatTryCatch(isolate, [&args](Isolate* isolate) {
+    CJObject skconfig = args[0].As<External>()->Value();
+    double skerror = SkipRuntime_setGCConfig(skconfig);
+    args.GetReturnValue().Set(Number::New(isolate, skerror));
+  });
+}
+
+// Not very useful, for now, only used for tests.
+void GetGCConfig(const FunctionCallbackInfo<Value>& args) {
+  Isolate* isolate = args.GetIsolate();
+  HandleScope scope(isolate);
+  NatTryCatch(isolate, [&args](Isolate* isolate) {
+    CJSON skresult = SkipRuntime_getGCConfig();
+    args.GetReturnValue().Set(External::New(isolate, skresult));
+  });
+}
+
 void GetToJSBinding(const FunctionCallbackInfo<Value>& args) {
   Isolate* isolate = args.GetIsolate();
   HandleScope scope(isolate);
@@ -1050,7 +1082,8 @@ void GetToJSBinding(const FunctionCallbackInfo<Value>& args) {
   AddFunction(isolate, binding, "SkipRuntime_Runtime__reload", ReloadOfRuntime);
   AddFunction(isolate, binding, "SkipRuntime_Runtime__closeResourceStreams",
               CloseResourceStreamsOfRuntime);
-
+  AddFunction(isolate, binding, "SkipRuntime_setGCConfig", SetGCConfig);
+  AddFunction(isolate, binding, "SkipRuntime_getGCConfig", GetGCConfig);
   args.GetReturnValue().Set(binding);
 }
 

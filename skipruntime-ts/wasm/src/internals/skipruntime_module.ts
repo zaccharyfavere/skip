@@ -199,6 +199,10 @@ export interface FromWasm {
     streams: ptr<Internal.CJArray<Internal.CJString>>,
   ): Handle<Error>;
 
+  SkipRuntime_setGCConfig(config: ptr<Internal.CJObject>): Handle<Error>;
+
+  SkipRuntime_getGCConfig(): ptr<Internal.CJSON>;
+
   // Reducer
 
   SkipRuntime_createReducer<K1 extends Json, V1 extends Json>(
@@ -700,6 +704,16 @@ export class WasmFromBinding implements FromBinding {
     return this.fromWasm.SkipRuntime_Runtime__closeResourceStreams(
       toPtr(streams),
     );
+  }
+
+  SkipRuntime_setGCConfig(
+    config: Pointer<Internal.CJObject>,
+  ): Handle<Error> {
+    return this.fromWasm.SkipRuntime_setGCConfig(toPtr(config));
+  }
+
+  SkipRuntime_getGCConfig(): Pointer<Internal.CJSON> {
+    return this.fromWasm.SkipRuntime_getGCConfig();
   }
 
   SkipRuntime_createReducer<K1 extends Json, V1 extends Json>(

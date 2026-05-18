@@ -684,6 +684,54 @@ export class ServiceInstance {
   }
 
   /**
+   * Update the garbage collector configuration at runtime.
+   *
+   * Fields absent from the provided object keep their current value.
+   * Fields present with the wrong type cause an exception.
+   */
+  setGCConfig(config: {
+    enabled?: boolean;
+    ttlMillis?: number;
+    maxGarbageSize?: number | null;
+    logsEnabled?: boolean;
+  }): void {
+    this.refs.setFork(this.forkName);
+    const errorHdl = this.refs.runWithGC(() => {
+      return this.refs.binding.SkipRuntime_setGCConfig(
+        this.refs.json().exportJSON(config),
+      );
+    });
+    if (errorHdl) throw this.refs.handles.deleteHandle(errorHdl);
+  }
+
+  /**
+   * Read the current garbage collector configuration.
+   * Not very useful but used for tests for now.
+   */
+  getGCConfig(): {
+    enabled: boolean;
+    ttlMillis: number;
+    maxGarbageSize: number | null;
+    logsEnabled: boolean;
+  } {
+    this.refs.setFork(this.forkName);
+    const result = this.refs.runWithGC(() => {
+      return this.refs
+        .json()
+        .importJSON(this.refs.binding.SkipRuntime_getGCConfig(), true);
+    });
+    if (typeof result === "number") {
+      throw this.refs.handles.deleteHandle(result as Handle<Error>);
+    }
+    return result as {
+      enabled: boolean;
+      ttlMillis: number;
+      maxGarbageSize: number | null;
+      logsEnabled: boolean;
+    };
+  }
+
+  /**
    * Initiate reactive subscription on a resource instance
    * @param resourceInstanceId - the resource instance identifier
    * @param notifier - the object containing subscription callbacks

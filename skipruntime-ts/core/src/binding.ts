@@ -186,6 +186,12 @@ export interface FromBinding {
     streams: Pointer<Internal.CJArray<Internal.CJString>>,
   ): Handle<Error>;
 
+  SkipRuntime_setGCConfig(
+    config: Pointer<Internal.CJObject>,
+  ): Handle<Error>;
+
+  SkipRuntime_getGCConfig(): Pointer<Internal.CJSON>;
+
   // Reducer
 
   SkipRuntime_createReducer<K1 extends Json, V1 extends Json>(
