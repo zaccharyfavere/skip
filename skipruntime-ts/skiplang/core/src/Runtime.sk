@@ -1155,6 +1155,17 @@ fun getReactiveResource(
 
 // Garbage Collector
 
+
+// TO_DELETE_BEFORE_PUSH
+fun getGarbageQueueSize(context: mutable SKStore.Context): Int {
+  garbageHdl = SKStore.EHandle(
+    SKStore.SID::keyType,
+    SKStore.IntFile::type,
+    kResourceGarbageDir,
+  );
+  garbageHdl.size(context)
+}
+
 // Reads the current GC config. Falls back to defaults if no service is loaded
 fun getGCConfig(context: mutable SKStore.Context): GCConfig {
   configHdl = SKStore.EHandle(

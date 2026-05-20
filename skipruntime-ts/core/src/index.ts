@@ -731,6 +731,14 @@ export class ServiceInstance {
     };
   }
 
+  // TO_DELETE_BEFORE_PUSH
+  getGarbageQueueSize(): number {
+    this.refs.setFork(this.forkName);
+    const size = this.refs.runWithGC(() => {
+      return this.refs.binding.SkipRuntime_getGarbageQueueSize();
+    });
+    return Number(size);
+  }
   /**
    * Initiate reactive subscription on a resource instance
    * @param resourceInstanceId - the resource instance identifier

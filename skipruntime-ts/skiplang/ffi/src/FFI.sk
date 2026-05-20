@@ -816,6 +816,17 @@ fun getGCConfigOfRuntime(): SKJSON.CJSON {
   }
 }
 
+// TO_DELETE_BEFORE_PUSH
+@export("SkipRuntime_getGarbageQueueSize")
+fun getGarbageQueueSizeOfRuntime(): Int {
+  runWithResult(context ~> {
+    getGarbageQueueSize(context)
+  }) match {
+  | Success(n) -> n
+  | Failure _ -> -1  // sentinelle erreur
+  }
+}
+
 /************ Context ****************/
 
 @export("SkipRuntime_Context__createLazyCollection")

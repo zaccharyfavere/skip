@@ -203,6 +203,8 @@ export interface FromWasm {
 
   SkipRuntime_getGCConfig(): ptr<Internal.CJSON>;
 
+  // TO_DELETE_BEFORE_PUSH
+  SkipRuntime_getGarbageQueueSize(): bigint;
   // Reducer
 
   SkipRuntime_createReducer<K1 extends Json, V1 extends Json>(
@@ -714,6 +716,11 @@ export class WasmFromBinding implements FromBinding {
 
   SkipRuntime_getGCConfig(): Pointer<Internal.CJSON> {
     return this.fromWasm.SkipRuntime_getGCConfig();
+  }
+
+  // TO_DELETE_BEFORE_PUSH
+  SkipRuntime_getGarbageQueueSize(): bigint {
+    return this.fromWasm.SkipRuntime_getGarbageQueueSize();
   }
 
   SkipRuntime_createReducer<K1 extends Json, V1 extends Json>(

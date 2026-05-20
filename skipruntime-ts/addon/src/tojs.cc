@@ -62,6 +62,7 @@ CJSON SkipRuntime_Runtime__reload(SKService service);
 double SkipRuntime_Runtime__closeResourceStreams(CJArray streams);
 double SkipRuntime_setGCConfig(CJObject config);
 CJSON SkipRuntime_getGCConfig();
+int64_t SkipRuntime_getGarbageQueueSize();
 }
 
 using skbinding::AddFunction;
@@ -1009,6 +1010,16 @@ void GetGCConfig(const FunctionCallbackInfo<Value>& args) {
   });
 }
 
+// TO_DELETE_BEFORE_PUSH
+void GetGarbageQueueSize(const FunctionCallbackInfo<Value>& args) {
+  Isolate* isolate = args.GetIsolate();
+  HandleScope scope(isolate);
+  NatTryCatch(isolate, [&args](Isolate* isolate) {
+    int64_t skresult = SkipRuntime_getGarbageQueueSize();
+    args.GetReturnValue().Set(Number::New(isolate, skresult));
+  });
+}
+
 void GetToJSBinding(const FunctionCallbackInfo<Value>& args) {
   Isolate* isolate = args.GetIsolate();
   HandleScope scope(isolate);
@@ -1084,6 +1095,9 @@ void GetToJSBinding(const FunctionCallbackInfo<Value>& args) {
               CloseResourceStreamsOfRuntime);
   AddFunction(isolate, binding, "SkipRuntime_setGCConfig", SetGCConfig);
   AddFunction(isolate, binding, "SkipRuntime_getGCConfig", GetGCConfig);
+  // TO_DELETE_BEFORE_PUSH
+  AddFunction(isolate, binding, "SkipRuntime_getGarbageQueueSize",
+            GetGarbageQueueSize);
   args.GetReturnValue().Set(binding);
 }
 
