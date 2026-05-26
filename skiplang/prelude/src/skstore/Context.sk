@@ -423,6 +423,7 @@ mutable class Context private {
   mutable sourceOverride: ?Path = None(),
   mutable fromContext: ?Context = None(),
 } {
+
   static fun create{canReuse: CanReuse = CRIfMatch()}: this {
     static{canReuse}
   }
@@ -816,6 +817,8 @@ mutable class Context private {
         withChanges = withPostponables || withPre;
         this.!tick = this.tick.next();
         this.!fromContext = None();
+        (newDirs, _purged) = this.dirs.purgeDeletedDirs();
+        this.!dirs = newDirs;
         break withChanges
       | Some((_time, Arrow(parentName, childName), toUpdate)) ->
         this.!toUpdate = toUpdate;
@@ -1296,6 +1299,22 @@ private class Dirs{private state: DMap<DirName, Dir> = DMap::empty()} {
   fun getChangesAfter(start: Tick): SortedSet<DirName> {
     this.state.getChangesAfter(start)
   }
+  // Removes all DeletedDir entries from the state map.
+  // Returns the number of entries removed.
+  fun purgeDeletedDirs(): (this, Int) {
+    toRemove = mutable Vector[];
+    this.state.values().each(dir -> {
+      dir match {
+      | DeletedDir _ -> toRemove.push(dir.getDirName())
+      | _ -> void
+      }
+    });
+    !this.state = toRemove.values().reduce(
+      (m, name) ~> m.remove(name),
+      this.state,
+    );
+    (this, toRemove.size())
+  }
 }
 
 fun export(
@@ -1654,6 +1673,9 @@ native fun shouldGC(Obstack): UInt32;
 
 @cpp_extern("SKIP_print_persistent_size")
 native fun printPersistentSize(): void;
+
+@cpp_extern("SKIP_get_persistent_size")
+native fun getPersistentSize(): Int;
 
 fun gContextInit(context: Context, fork: ?String = None()): void {
   invariant(fork.isNone(), "Init can only be used to init main context");

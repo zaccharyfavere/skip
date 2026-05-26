@@ -827,6 +827,11 @@ fun getGarbageQueueSizeOfRuntime(): Int {
   }
 }
 
+@export("SkipRuntime_getSkipPersistentSize")
+fun getSkipPersistentSizeOfRuntime(): Int {
+  getSkipPersistentSize()
+}
+
 /************ Context ****************/
 
 @export("SkipRuntime_Context__createLazyCollection")

@@ -194,6 +194,8 @@ export interface FromBinding {
 
   // TO_DELETE_BEFORE_PUSH
   SkipRuntime_getGarbageQueueSize(): bigint;
+
+  SkipRuntime_getSkipPersistentSize(): bigint;
   // Reducer
 
   SkipRuntime_createReducer<K1 extends Json, V1 extends Json>(

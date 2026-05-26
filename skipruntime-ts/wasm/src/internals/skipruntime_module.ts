@@ -205,6 +205,8 @@ export interface FromWasm {
 
   // TO_DELETE_BEFORE_PUSH
   SkipRuntime_getGarbageQueueSize(): bigint;
+
+  SkipRuntime_getSkipPersistentSize(): bigint;
   // Reducer
 
   SkipRuntime_createReducer<K1 extends Json, V1 extends Json>(
@@ -721,6 +723,10 @@ export class WasmFromBinding implements FromBinding {
   // TO_DELETE_BEFORE_PUSH
   SkipRuntime_getGarbageQueueSize(): bigint {
     return this.fromWasm.SkipRuntime_getGarbageQueueSize();
+  }
+
+  SkipRuntime_getSkipPersistentSize(): bigint {
+  return this.fromWasm.SkipRuntime_getSkipPersistentSize();
   }
 
   SkipRuntime_createReducer<K1 extends Json, V1 extends Json>(

@@ -118,25 +118,26 @@ fun buildResourcesGraph(
     kResourceVersionDir,
   );
   idbyresourceHdl = resourcesHdl.map(
-    ResourceDef::keyType,
-    SKStore.StringFile::type,
-    context,
-    dirname.sub("idbyresource"),
-    (_c, writer, key, it) ~> {
-      writer.set(it.first, SKStore.StringFile(key.value));
-    },
-  );
+      ResourceDef::keyType,
+      SKStore.StringFile::type,
+      context,
+      dirname.sub("idbyresource"),
+      (_c, writer, key, it) ~> {
+        it.next() match {
+        | Some(first) -> writer.set(first, SKStore.StringFile(key.value))
+        | None() -> void
+        }
+      },
+    );
   availablesHdl = idbyresourceHdl.map(
-    ResourceDef::keyType,
-    SKStore.IntFile::type,
-    context,
-    kResourceAvailablesDir,
-    (_c, writer, key, _it) ~> {
-      // map to ignore array changes
-      // to prevent recompute on each add/remove session
-      writer.set(key, SKStore.IntFile(1))
-    },
-  );
+      ResourceDef::keyType,
+      SKStore.IntFile::type,
+      context,
+      kResourceAvailablesDir,
+      (_c, writer, key, _it) ~> {
+        writer.set(key, SKStore.IntFile(1))
+      },
+    );
   _ = availablesHdl.map(
     ResourceDef::keyType,
     ResourceInfo::type,
@@ -1156,7 +1157,7 @@ fun getReactiveResource(
 // Garbage Collector
 
 
-// TO_DELETE_BEFORE_PUSH
+// Get the actual garbage queue size, used for debug
 fun getGarbageQueueSize(context: mutable SKStore.Context): Int {
   garbageHdl = SKStore.EHandle(
     SKStore.SID::keyType,
@@ -1164,6 +1165,10 @@ fun getGarbageQueueSize(context: mutable SKStore.Context): Int {
     kResourceGarbageDir,
   );
   garbageHdl.size(context)
+}
+
+fun getSkipPersistentSize(): Int {
+  SKStore.getPersistentSize()
 }
 
 // Reads the current GC config. Falls back to defaults if no service is loaded
@@ -1301,9 +1306,6 @@ fun checkGarbage(context: mutable SKStore.Context): void {
       if (time - suppressed > config.ttlMillis) {
         key = kf.i0;
         destroyed.push(key);
-        // Effective destruction of the resource: writing an empty array
-        // is SKStore's way of erasing the entry. Reactive cascades will
-        // then propagate the deletion to dependent directories.
         resourceHdl.writeArray(context, key, Array[]);
       }
     })
@@ -1350,6 +1352,16 @@ fun checkGarbage(context: mutable SKStore.Context): void {
           " | queue_size=" + garbageHdl.size(context).toString(),
       );
     };
+  if (!destroyed.isEmpty()) {
+    context.update();
+    gcLog(
+      config,
+      "sweep done | destroyed=" + destroyed.size().toString() +
+        " | queue_size=" + garbageHdl.size(context).toString(),
+    );
+    // EXPERIMENTAL -> fixes the reads's leak
+    context.!reads = SortedSet[];
+  };
 }
 
 fun updateContext(context: mutable SKStore.Context): void {

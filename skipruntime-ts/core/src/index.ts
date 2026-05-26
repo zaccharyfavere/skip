@@ -739,6 +739,14 @@ export class ServiceInstance {
     });
     return Number(size);
   }
+
+  getSkipPersistentSize(): number {
+    this.refs.setFork(this.forkName);
+    return Number(this.refs.runWithGC(() => {
+      return this.refs.binding.SkipRuntime_getSkipPersistentSize();
+    }));
+  }
+
   /**
    * Initiate reactive subscription on a resource instance
    * @param resourceInstanceId - the resource instance identifier

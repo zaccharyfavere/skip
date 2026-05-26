@@ -63,6 +63,7 @@ double SkipRuntime_Runtime__closeResourceStreams(CJArray streams);
 double SkipRuntime_setGCConfig(CJObject config);
 CJSON SkipRuntime_getGCConfig();
 int64_t SkipRuntime_getGarbageQueueSize();
+int64_t SkipRuntime_getSkipPersistentSize();
 }
 
 using skbinding::AddFunction;
@@ -1020,6 +1021,15 @@ void GetGarbageQueueSize(const FunctionCallbackInfo<Value>& args) {
   });
 }
 
+void GetSkipPersistentSize(const FunctionCallbackInfo<Value>& args) {
+  Isolate* isolate = args.GetIsolate();
+  HandleScope scope(isolate);
+  NatTryCatch(isolate, [&args](Isolate* isolate) {
+    int64_t skresult = SkipRuntime_getSkipPersistentSize();
+    args.GetReturnValue().Set(Number::New(isolate, skresult));
+  });
+}
+
 void GetToJSBinding(const FunctionCallbackInfo<Value>& args) {
   Isolate* isolate = args.GetIsolate();
   HandleScope scope(isolate);
@@ -1098,6 +1108,8 @@ void GetToJSBinding(const FunctionCallbackInfo<Value>& args) {
   // TO_DELETE_BEFORE_PUSH
   AddFunction(isolate, binding, "SkipRuntime_getGarbageQueueSize",
             GetGarbageQueueSize);
+  AddFunction(isolate, binding, "SkipRuntime_getSkipPersistentSize",
+            GetSkipPersistentSize);
   args.GetReturnValue().Set(binding);
 }
 
