@@ -192,10 +192,11 @@ export interface FromBinding {
 
   SkipRuntime_getGCConfig(): Pointer<Internal.CJSON>;
 
-  // TO_DELETE_BEFORE_PUSH
   SkipRuntime_getGarbageQueueSize(): bigint;
 
+  // Get internal palloc size, used in the stress-tester
   SkipRuntime_getSkipPersistentSize(): bigint;
+  
   // Reducer
 
   SkipRuntime_createReducer<K1 extends Json, V1 extends Json>(

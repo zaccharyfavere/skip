@@ -1293,12 +1293,15 @@ private class Dirs{private state: DMap<DirName, Dir> = DMap::empty()} {
     | Some(x) -> x
     }
   }
+  
   fun values(): mutable Iterator<Dir> {
     this.state.values()
   }
+  
   fun getChangesAfter(start: Tick): SortedSet<DirName> {
     this.state.getChangesAfter(start)
   }
+
   // Removes all DeletedDir entries from the state map.
   // Returns the number of entries removed.
   fun purgeDeletedDirs(): (this, Int) {

@@ -203,7 +203,6 @@ export interface FromWasm {
 
   SkipRuntime_getGCConfig(): ptr<Internal.CJSON>;
 
-  // TO_DELETE_BEFORE_PUSH
   SkipRuntime_getGarbageQueueSize(): bigint;
 
   SkipRuntime_getSkipPersistentSize(): bigint;
@@ -720,7 +719,6 @@ export class WasmFromBinding implements FromBinding {
     return this.fromWasm.SkipRuntime_getGCConfig();
   }
 
-  // TO_DELETE_BEFORE_PUSH
   SkipRuntime_getGarbageQueueSize(): bigint {
     return this.fromWasm.SkipRuntime_getGarbageQueueSize();
   }

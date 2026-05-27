@@ -706,7 +706,6 @@ export class ServiceInstance {
 
   /**
    * Read the current garbage collector configuration.
-   * Not very useful but used for tests for now.
    */
   getGCConfig(): {
     enabled: boolean;
@@ -731,7 +730,13 @@ export class ServiceInstance {
     };
   }
 
-  // TO_DELETE_BEFORE_PUSH
+/**
+ * Returns the current number of resources queued in the garbage collector.
+ *
+ * The queue holds resources that have been closed via closeResourceInstance
+ * but not yet destroyed. Resources are evicted from the queue either when their
+ * TTL expires or when the queue exceeds the cap configured via `setGCConfig`.
+ */
   getGarbageQueueSize(): number {
     this.refs.setFork(this.forkName);
     const size = this.refs.runWithGC(() => {
@@ -740,6 +745,13 @@ export class ServiceInstance {
     return Number(size);
   }
 
+/**
+ * Returns the size in bytes of Skip's persistent memory.
+ *
+ * This measures the memory used by Skip's internal allocator, excluding
+ * V8 heap and Node.js overhead. Useful for detecting memory leaks in the
+ * runtime. Actually used as the memory metric for the stress-tester
+ */
   getSkipPersistentSize(): number {
     this.refs.setFork(this.forkName);
     return Number(this.refs.runWithGC(() => {

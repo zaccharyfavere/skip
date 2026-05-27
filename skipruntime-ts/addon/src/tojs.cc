@@ -1105,7 +1105,6 @@ void GetToJSBinding(const FunctionCallbackInfo<Value>& args) {
               CloseResourceStreamsOfRuntime);
   AddFunction(isolate, binding, "SkipRuntime_setGCConfig", SetGCConfig);
   AddFunction(isolate, binding, "SkipRuntime_getGCConfig", GetGCConfig);
-  // TO_DELETE_BEFORE_PUSH
   AddFunction(isolate, binding, "SkipRuntime_getGarbageQueueSize",
             GetGarbageQueueSize);
   AddFunction(isolate, binding, "SkipRuntime_getSkipPersistentSize",
