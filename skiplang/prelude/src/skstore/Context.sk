@@ -376,6 +376,96 @@ mutable base class WriteChecker {
 }
 
 /*****************************************************************************/
+/* Async Support */
+/*****************************************************************************/
+
+// Identifies one async call: the function and its input, reduced to hashes by the native
+// structural hash (no trait needed on AsyncFunction nor Key). A replayed mapper rebuilds
+// an identical AsyncFunction -> identical CallId -> cache hit, so the replay loop
+// terminates. Relies on mapper determinism.
+value class CallId(function: Int, input: Int) uses Orderable {
+  static fun create(f: AsyncFunction<Key, File>, input: Key): CallId {
+    CallId(hash(f), hash(input))
+  }
+}
+
+// One pending async call: what to call, and on which key.
+base class AsyncCall {
+  children =
+  | PendingCall(callId: CallId, f: AsyncFunction<Key, File>, input: Key)
+}
+
+/* Async bookkeeping carried by a Context during update().
+   Mutable: updated in place as the cascade discovers calls.
+
+   calls map: arrow -> calls pending on that arrow
+*/
+mutable class AsyncData{
+  mutable calls: SortedMap<ArrowKey, Array<AsyncCall>> = SortedMap[],
+} {
+  /* Create mutable empty copy: for the working copy held by a Context. */
+  static fun mcreate(): mutable this {
+    mutable AsyncData{}
+  }
+  /* Deep mutable copy, mirroring how Context clones its mutable fields. Inner maps are
+     frozen, so sharing them across copies is safe; only the wrapper must be re-created. */
+  readonly fun mclone(): mutable this {
+    mutable AsyncData{
+      calls => this.calls,
+    }
+  }
+
+  // calls map: append a pending call under the arrow that triggered it.
+  mutable fun addCall(arrow: ArrowKey, call: AsyncCall): void {
+    existing = this.calls.maybeGet(arrow) match {
+    | Some(arr) -> arr
+    | None() -> Array[]
+    };
+    this.!calls = this.calls.set(arrow, existing.concat(Array[call]))
+  }
+}
+
+/* Thrown by registerAsyncCall after the call has been recorded in AsyncData.
+   Carries nothing: it only unwinds the current mapper. Caught at the mapper
+   site so the cascade can keep going and record further calls. */
+class AsyncCallPending() extends Exception {
+  fun toString(): String {
+    "Async call pending"
+  }
+}
+
+/* Thrown at the end of update() when calls remain pending. Not caught
+   internally; it unwinds past the sync (aborting the transaction) and carries the full
+   calls map out to the caller (consumed by the runtime layer, later). */
+class AsyncCallsCollected(calls: SortedMap<ArrowKey, Array<AsyncCall>>) extends Exception {
+  fun toString(): String {
+    "Async calls pending"
+  }
+}
+
+// Result of one async call: either a value or an error.
+base class AsyncResult<F> {
+  children =
+  | AOk(F)
+  | AError(String)
+}
+
+/* The recipe for one async call. compute() takes the key and a callback and returns
+   nothing: the result (or error) is delivered later through the
+   callback, not returned. Equality is what lets us build the
+   CallId (this function + its input key) and dedup calls. */
+base class AsyncFunction<K: frozen, F: frozen> uses Unsafe.Downcastable, Equality {
+  fun compute(K, (AsyncResult<F>) -> void): void;
+}
+
+/* Read-only view of already-resolved async calls, supplied by the caller. skstore never
+   writes to it: whoever runs a call stores the result on its own side. Frozen, so the
+   caller rebuilds it with the new results before each replay. */
+base class AsyncCache {
+  fun get(callId: CallId): ?AsyncResult<File>;
+}
+
+/*****************************************************************************/
 /* The context */
 /*****************************************************************************/
 
@@ -394,6 +484,13 @@ mutable class Context private {
   private mutable lazyCapacity: Int = 10,
   private mutable toUpdate: SortedMap<(TimeStack, Time), Arrow> = SortedMap[],
   private mutable deps: Deps = Deps::empty(),
+  /* Per-transaction async bookkeeping: the calls discovered while this update ran.
+     Discarded along with the delta Context when the transaction aborts -- collected calls
+     leave through AsyncCallsCollected, resolved results live in the platform-side cache. */
+  private mutable asyncData: mutable AsyncData = AsyncData::mcreate(),
+  /* Required as soon as a mapper issues an async call: without it a replay could never
+     hit a resolved result, so the caller's retry loop would never converge. */
+  mutable asyncCache: ?AsyncCache = None(),
   mutable debugMode: Bool = debugMode,
   private mutable hasPre: SortedSet<DirName> = SortedSet[],
   mutable newDirs: SortedSet<DirName> = SortedSet[],
@@ -570,6 +667,8 @@ mutable class Context private {
       dirsWithSharedSubDirs => this.dirsWithSharedSubDirs,
       sharedSubDirsRefCount => this.sharedSubDirsRefCount,
       writeChecker => this.writeChecker.map(x -> x.mclone()),
+      asyncData => this.asyncData.mclone(),
+      asyncCache => this.asyncCache,
       purgeFrom => this.purgeFrom,
       sourceOverride => this.sourceOverride,
       fromContext => this.fromContext,
@@ -603,6 +702,8 @@ mutable class Context private {
     this.!dirsWithSharedSubDirs = ctx.dirsWithSharedSubDirs;
     this.!sharedSubDirsRefCount = ctx.sharedSubDirsRefCount;
     this.!writeChecker = ctx.writeChecker.map(x -> x.mclone());
+    this.!asyncData = ctx.asyncData.mclone();
+    this.!asyncCache = ctx.asyncCache;
     this.!purgeFrom = ctx.purgeFrom;
     this.!sourceOverride = ctx.sourceOverride;
     this.!fromContext = ctx.fromContext;
@@ -627,6 +728,48 @@ mutable class Context private {
 
   readonly fun currentArrow(): ?ArrowKey {
     this.arrowStack.maybeHead().map(x -> x.i0)
+  }
+
+  // Records an async call discovered while running a mapper, under the current arrow,
+  // then throws AsyncCallPending so the cascade unwinds this computation and moves on.
+  mutable fun registerAsyncCall(call: AsyncCall): void {
+    this.currentArrow() match {
+    | Some(arrow) ->
+      this.asyncData.addCall(arrow, call);        // register in calls map
+      throw AsyncCallPending()                    // throw simple exception (for this call only)
+    | None() ->
+      invariant_violation("registerAsyncCall called outside of an arrow context")
+    }
+  }
+
+  /* True if some pending async call targets this output dir. Lets a reader tell an entry
+     left empty by a suspended mapper from a genuinely missing value.
+     Dir-level, not key-level: an arrow carries the PARENT key being mapped, and a mapper
+     may write any child keys, so the arrow key cannot be matched against the key read.
+     A false positive only delays a genuine error by one round. */
+  readonly fun hasPendingAsyncCalls(dirName: DirName): Bool {
+    for (arrow => _ in this.asyncData.calls) {
+      if (arrow.childName == dirName) return true
+    };
+    false
+  }
+
+  /* Entry point for an async call issued from a mapper. Returns the result if this exact
+     call (same function, same input) already resolved; otherwise records it and unwinds
+     through AsyncCallPending, letting the cascade carry on and collect the other calls. */
+  mutable fun asyncCall(f: AsyncFunction<Key, File>, input: Key): AsyncResult<File> {
+    callId = CallId::create(f, input);
+    cache = this.asyncCache match {
+    | Some(c) -> c
+    | None() ->
+      invariant_violation("Async call issued on a context with no AsyncCache")
+    };
+    cache.get(callId) match {
+    | Some(result) -> result
+    | None() ->
+      this.registerAsyncCall(PendingCall(callId, f, input));
+      invariant_violation("registerAsyncCall is expected to throw")
+    }
   }
 
   readonly fun currentTimeStack(): ?TimeStack {
@@ -809,6 +952,14 @@ mutable class Context private {
     loop {
       this.toUpdate.removeMin() match {
       | None() ->
+        /* Update queue done. If async calls piled up during it, the
+           outputs are incomplete and we cannot commit. Throw the aggregate exception
+           carrying the map containing all pending async calls;
+           it unwinds past the sync, aborts the transaction, and hands the
+           pending calls to the caller. */
+        if (!this.asyncData.calls.isEmpty()) {
+          throw AsyncCallsCollected(this.asyncData.calls)
+        };
         this.!dirty = SortedMap[];
         this.!dirtyReaders = SortedMap[];
         withPostponables = this.checkPostponables();
@@ -1478,7 +1629,10 @@ class Fork(
   postponables: Queue<FPostponable> = Queue[],
 )
 
-class Contexts(main: Context, forks: SortedMap<String, Fork> = SortedMap[]) {
+class Contexts(
+  main: Context,
+  forks: SortedMap<String, Fork> = SortedMap[],
+) {
   //
   fun get(optName: ?String): Context {
     optName match {
@@ -1486,7 +1640,6 @@ class Contexts(main: Context, forks: SortedMap<String, Fork> = SortedMap[]) {
     | _ -> this.main
     }
   }
-
   fun check(
     optName: ?String,
     context: Context,
