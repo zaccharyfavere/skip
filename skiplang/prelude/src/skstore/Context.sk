@@ -402,6 +402,10 @@ base class AsyncCall {
 */
 mutable class AsyncData{
   mutable calls: SortedMap<ArrowKey, Array<AsyncCall>> = SortedMap[],
+  /* CallIds already recorded this update, across all arrows. Lets registerAsyncCall skip
+     adding a duplicate PendingCall when two mappers issue the same call: the call runs
+     once, and its cached result is shared. */
+  mutable seenCallIds: SortedSet<CallId> = SortedSet[],
 } {
   /* Create mutable empty copy: for the working copy held by a Context. */
   static fun mcreate(): mutable this {
@@ -412,16 +416,23 @@ mutable class AsyncData{
   readonly fun mclone(): mutable this {
     mutable AsyncData{
       calls => this.calls,
+      seenCallIds => this.seenCallIds,
     }
   }
 
   // calls map: append a pending call under the arrow that triggered it.
-  mutable fun addCall(arrow: ArrowKey, call: AsyncCall): void {
+  mutable fun addCall(arrow: ArrowKey, callId: CallId, call: AsyncCall): void {
     existing = this.calls.maybeGet(arrow) match {
     | Some(arr) -> arr
     | None() -> Array[]
     };
-    this.!calls = this.calls.set(arrow, existing.concat(Array[call]))
+    this.!calls = this.calls.set(arrow, existing.concat(Array[call]));
+    this.!seenCallIds = this.seenCallIds.set(callId)
+  }
+
+  // True if this exact call was already recorded this update (under any arrow).
+  readonly fun hasCall(callId: CallId): Bool {
+    this.seenCallIds.contains(callId)
   }
 }
 
@@ -735,8 +746,16 @@ mutable class Context private {
   mutable fun registerAsyncCall(call: AsyncCall): void {
     this.currentArrow() match {
     | Some(arrow) ->
-      this.asyncData.addCall(arrow, call);        // register in calls map
-      throw AsyncCallPending()                    // throw simple exception (for this call only)
+      callId = call match {
+      | PendingCall(cId, _, _) -> cId
+      };
+      // Record the call only if this CallId is new: a second mapper issuing the same call
+      // still suspends, but adds no duplicate, so compute() runs once and the result is
+      // shared. Suspension and deduplication are separate: we always throw, we don't always add.
+      if (!this.asyncData.hasCall(callId)) {
+        this.asyncData.addCall(arrow, callId, call)
+      };
+      throw AsyncCallPending()
     | None() ->
       invariant_violation("registerAsyncCall called outside of an arrow context")
     }
